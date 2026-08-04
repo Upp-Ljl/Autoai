@@ -12,7 +12,10 @@ import yaml
 from .models import EventType, RelayEvent, RepoMonitor
 
 
-_SENTINEL_RE = re.compile(r"<!--\s*SAT2_RELAY_EVENT_V(?:1|2)\s*-->\s*```(?:yaml|yml)\s*(.*?)```", re.I | re.S)
+# A delivered Capsule may retain its delivery marker immediately before the
+# event YAML when a Session quotes it in a response. Treat that marker as
+# transport metadata, not as a reason to discard an otherwise valid event.
+_SENTINEL_RE = re.compile(r"<!--\s*SAT2_RELAY_EVENT_V(?:1|2)\s*-->(?:\s|<!--\s*SAT2_RELAY_DELIVERY:\s*[^>]*-->)*```(?:yaml|yml)\s*(.*?)```", re.I | re.S)
 _FENCE_RE = re.compile(r"```sat2-relay\s*(.*?)```", re.I | re.S)
 
 

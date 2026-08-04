@@ -31,6 +31,16 @@ def test_extract_and_validate():
     assert event.candidate_sha == "a" * 40
 
 
+def test_extract_ignores_delivery_marker_between_sentinel_and_yaml():
+    body = event_block().replace(
+        "<!-- SAT2_RELAY_EVENT_V1 -->",
+        "<!-- SAT2_RELAY_EVENT_V1 -->\n<!-- SAT2_RELAY_DELIVERY: WP-B3-001:mentor -->",
+    )
+    docs = extract_event_documents(body)
+    assert len(docs) == 1
+    assert validate_event_document(docs[0]).event_id == "WP-B3-001"
+
+
 def test_invalid_sha_fails_closed():
     body = event_block().replace("a" * 40, "abc")
     try:
