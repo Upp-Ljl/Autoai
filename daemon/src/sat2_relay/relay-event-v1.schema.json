@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sat2.local/schemas/relay-event-v1.schema.json",
+  "title": "SAT2 Relay Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "event_id",
+    "event_type",
+    "repository",
+    "task_id",
+    "actor_role",
+    "pr_number",
+    "attempt",
+    "timestamp"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "sat2-relay/v1"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{3,160}$"
+    },
+    "event_type": {
+      "enum": [
+        "SAT2_TASK_AUTHORIZED",
+        "SAT2_WORKER_ACK",
+        "SAT2_WORKER_CHECKPOINT",
+        "SAT2_MENTOR_CHANGES_REQUIRED",
+        "SAT2_MENTOR_ACCEPTED",
+        "SAT2_TASK_BLOCKED",
+        "SAT2_HUMAN_GATE",
+        "SAT2_RELAY_ALERT",
+        "SAT2_TASK_CANCELLED"
+      ]
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 160
+    },
+    "actor_role": {
+      "enum": [
+        "mentor",
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "user",
+        "relay",
+        "s1",
+        "s2",
+        "s3",
+        "s4"
+      ]
+    },
+    "target_role": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 40
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "base_sha": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "candidate_sha": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "reviewed_sha": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "authorized_sha": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "control_head_sha": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "next_actor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 40
+    },
+    "next_task": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 160
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "summary": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 4000
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "SAT2_TASK_AUTHORIZED"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "base_sha"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "SAT2_WORKER_CHECKPOINT"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "candidate_sha"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "SAT2_MENTOR_CHANGES_REQUIRED",
+              "SAT2_MENTOR_ACCEPTED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reviewed_sha"
+        ]
+      }
+    }
+  ]
+}

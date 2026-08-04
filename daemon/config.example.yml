@@ -1,0 +1,18 @@
+server:
+  host: 127.0.0.1
+  port: 8765
+  api_token: REPLACE_WITH_OUTPUT_FROM_sat2-relay_init
+storage:
+  database: state/state.sqlite3
+  log: logs/sat2-relay.jsonl
+  lock: state/sat2-relay.lock
+  credentials: credentials.bin
+github:
+  repository: Upp-Ljl/sat2
+  token_env: SAT2_GITHUB_TOKEN
+  alert_token_env: SAT2_GITHUB_ALERT_TOKEN
+  repository_config_ref: maintenance/sat2-relay-v1
+  repository_config_path: .sat2/relay.yml
+  allow_writes: false
+relay:
+  mode_override: null
