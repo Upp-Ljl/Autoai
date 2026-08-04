@@ -287,6 +287,8 @@ class RelayService:
         changed_files: list[str],
         comment: dict[str, Any],
         raw: dict[str, Any],
+        *,
+        suppress_delivery: bool = False,
     ) -> tuple[bool, bool]:
         assert self.repo_config is not None
         event = validate_event_document(raw)
@@ -311,15 +313,16 @@ class RelayService:
         capsule = build_execution_capsule(event, target, marker, monitor, delivery_token) if target else None
         new_state = transition_name(event)
         state_sha = event.candidate_sha or event.reviewed_sha or event.authorized_sha or event.base_sha
+        dispatch = mode is not RelayMode.SHADOW and not suppress_delivery
         inserted, delivery_id = self.db.accept_event(
             event,
             event.model_dump_json(),
             new_state=new_state,
             worker_role=monitor.worker_role,
             state_sha=state_sha,
-            target_role=target if mode is not RelayMode.SHADOW else None,
-            body=capsule if mode is not RelayMode.SHADOW else None,
-            delivery_token=delivery_token,
+            target_role=target if dispatch else None,
+            body=capsule if dispatch else None,
+            delivery_token=delivery_token if dispatch else None,
             required_apps=monitor.required_apps,
             strict_apps=monitor.strict_apps,
             awaiting_approval=mode is RelayMode.DRY_RUN,
@@ -392,6 +395,8 @@ class RelayService:
                     continue
                 counts["comments"] += 1
                 existing = self.db.comment_status(self.repo_config.repository, monitor.pr_number, comment_id)
+                history_replay_key = f"history_replay:{self.repo_config.repository}:{monitor.pr_number}:{comment_id}"
+                history_replay = self.db.get_meta(history_replay_key) == "1"
                 body = str(comment.get("body") or "")
                 body_hash = hashlib.sha256(body.encode()).hexdigest()
                 updated = str(comment.get("updated_at") or comment.get("created_at"))
@@ -435,7 +440,15 @@ class RelayService:
                         continue
                 for raw in docs:
                     try:
-                        inserted, delivered = self._process_event(monitor, pr, commit_shas, changed_files, comment, raw)
+                        inserted, delivered = self._process_event(
+                            monitor,
+                            pr,
+                            commit_shas,
+                            changed_files,
+                            comment,
+                            raw,
+                            suppress_delivery=history_replay,
+                        )
                         counts["events"] += int(inserted)
                         counts["deliveries"] += int(delivered)
                     except TaskSpecUnavailable as exc:
@@ -457,6 +470,8 @@ class RelayService:
                         self._alert("error", "PROTOCOL_OR_STATE_INVALID", f"Comment {comment_id}: {exc}", monitor.task_id, monitor.pr_number)
                         break
                 self.db.record_comment(self.repo_config.repository, monitor.pr_number, comment, outcome, error_detail)
+                if history_replay and outcome == "processed":
+                    self.db.set_meta(history_replay_key, "")
         self._check_extension_health()
         self.db.set_meta("last_poll", datetime.now(UTC).isoformat())
         self.db.set_meta("last_poll_counts", json.dumps(counts, sort_keys=True))

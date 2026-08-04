@@ -331,10 +331,12 @@ def create_app(local: LocalConfig, db: RelayDB, service: RelayService, poll_enab
             raise HTTPException(status_code=409, detail={"code": exc.code, "detail": exc.detail}) from None
 
     @app.post("/api/v2/comments/{pr_number}/{comment_id}/replay", dependencies=[Depends(auth)])
-    def replay_comment(pr_number: int, comment_id: int) -> dict:
+    def replay_comment(pr_number: int, comment_id: int, history_only: bool = False) -> dict:
         if not db.mark_comment_for_replay(local.github_repository, pr_number, comment_id):
             raise HTTPException(status_code=404, detail="comment processing record not found")
-        return {"ok": True}
+        if history_only:
+            db.set_meta(f"history_replay:{local.github_repository}:{pr_number}:{comment_id}", "1")
+        return {"ok": True, "history_only": history_only}
 
     @app.post("/api/v2/alerts/{alert_id}/resolve", dependencies=[Depends(auth)])
     def resolve_alert(alert_id: int) -> dict:
