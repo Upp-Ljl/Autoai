@@ -298,7 +298,20 @@ class RelayService:
         event.source_comment_url = str(comment.get("html_url") or "")
         event.source_actor = str((comment.get("user") or {}).get("login") or "")
         validate_actor_semantics(event, monitor)
-        validate_pr_binding(event, pr, commit_shas)
+        if suppress_delivery:
+            # Historical recovery may replay a previously valid checkpoint
+            # after the PR has advanced. It remains fail-closed: every SHA
+            # named by the event must still belong to this PR's commit chain.
+            historical_shas = {
+                value
+                for value in (event.control_head_sha, event.candidate_sha, event.reviewed_sha, event.authorized_sha, event.base_sha)
+                if value
+            }
+            missing_shas = historical_shas - commit_shas
+            if missing_shas:
+                raise ValueError(f"history replay SHA is not in PR commit chain: {sorted(missing_shas)}")
+        else:
+            validate_pr_binding(event, pr, commit_shas)
         self._validate_monitor_contract(monitor, pr, changed_files, event)
         previous = self.db.task_state(event.task_id)
         validate_transition(
