@@ -1,3 +1,11 @@
+# ⚠️ Historical document — superseded by Relay 2.2
+
+> 本文件是 Relay 2.0 的历史需求记录，保留用于追溯，不是当前运行合同。当前规则以 [`../SAT2_CHAT_RELAY_PROTOCOL.md`](../SAT2_CHAT_RELAY_PROTOCOL.md)、[`../RELAY_2.2_OPERATION.md`](../RELAY_2.2_OPERATION.md) 和仓库根目录的 `sat2AI协作方式.md` 为准。
+>
+> **不得继续执行本文件中任何要求 Session 手写/发布 Relay YAML、把 `WORKER_ACK` 作为阻塞步骤、依赖 Windows 登录计划任务，或把未绑定 endpoint 视为永久失败的旧规则。** Relay 2.2 使用带 `delivery_token` 的简短 Decision JSON，由本地 Relay 自动生成 SHA、parent、actor、target 和 GitHub 控制评论。
+
+---
+
 # SAT2 Relay 2.0 最终需求与验收规范
 
 ## 1. 目标状态
