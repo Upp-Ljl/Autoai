@@ -1,6 +1,7 @@
 import {loadSettings, saveSettings} from "./lib.js";
 
 const $ = (id) => document.getElementById(id);
+const NATIVE_HOST = "com.sat2.relay.host";
 let settings;
 
 function renderBindings() {
@@ -25,6 +26,72 @@ function renderBindings() {
   }
 }
 
+function nativeRegistrationCommand() {
+  return `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\\SAT2Relay\\on-demand\\REGISTER_NATIVE_HOST.ps1" -ExtensionId ${chrome.runtime.id}`;
+}
+
+async function nativeMessage(command) {
+  try {
+    const result = await chrome.runtime.sendNativeMessage(NATIVE_HOST, {command});
+    if (!result?.ok) {
+      return {
+        ok: false,
+        code: result?.code || "NATIVE_HOST_FAILED",
+        error: result?.detail || "Native host returned an error.",
+        native: result,
+        registration_command: nativeRegistrationCommand()
+      };
+    }
+    return {ok: true, native: result};
+  } catch (error) {
+    return {
+      ok: false,
+      code: "NATIVE_HOST_UNAVAILABLE",
+      error: error?.message || String(error),
+      extension_id: chrome.runtime.id,
+      registration_command: nativeRegistrationCommand()
+    };
+  }
+}
+
+async function waitForDaemon(timeoutMs = 20000) {
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started < timeoutMs) {
+    last = await chrome.runtime.sendMessage({type: "SAT2_TEST_DAEMON"});
+    if (last?.ok) return last;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return {ok: false, error: last?.error || "DAEMON_START_TIMEOUT"};
+}
+
+async function startCollaboration() {
+  let health = await chrome.runtime.sendMessage({type: "SAT2_TEST_DAEMON"});
+  let native = {ok: true, native: {action: "already_running"}};
+
+  if (!health?.ok) {
+    native = await nativeMessage("ensure_running");
+    if (!native.ok) return native;
+    health = await waitForDaemon();
+    if (!health?.ok) {
+      return {ok: false, code: "DAEMON_START_TIMEOUT", error: health?.error || "Relay did not become healthy.", native};
+    }
+  }
+
+  settings = await loadSettings();
+  settings.autoEnabled = true;
+  await saveSettings(settings);
+  $("auto").checked = true;
+
+  const cycle = await chrome.runtime.sendMessage({type: "SAT2_RUN_NOW"});
+  if (!cycle?.ok && !cycle?.skipped) {
+    return {ok: false, code: "START_CYCLE_FAILED", error: cycle?.error || "Initial Relay cycle failed.", native, health, cycle};
+  }
+
+  const doctor = await chrome.runtime.sendMessage({type: "SAT2_DOCTOR"});
+  return {ok: true, native, health, cycle, doctor, extension_id: chrome.runtime.id};
+}
+
 async function refresh() {
   settings = await loadSettings();
   $("auto").checked = settings.autoEnabled;
@@ -37,16 +104,39 @@ async function refresh() {
     const count = (state) => deliveries.filter((row) => row.status === state).length;
     const openAlerts = (snapshot?.alerts || []).filter((row) => !row.resolved_at).length;
     $("status").className = result.last_poll_error ? "status bad" : "status ok";
-    $("status").textContent = `Control Center 在线\n模式: ${result.mode}\n最近轮询: ${result.last_poll || "尚无"}\nToken: ${result.github_token_source || "unknown"} / ${result.github_token_fingerprint || "none"}`;
+    $("status").textContent = `Control Center 在线\n模式: ${result.mode}\n最近轮询: ${result.last_poll || "尚无"}\nToken: ${result.github_token_source || "unknown"} / ${result.github_token_fingerprint || "none"}\nExtension ID: ${chrome.runtime.id}`;
     const outbox = snapshot?.outbox || [];
     const pendingOutbox = outbox.filter((row) => !["published", "blocked", "cancelled"].includes(row.status)).length;
     $("queue").textContent = `待投递 ${count("pending") + count("retry")} · 租约中 ${count("leased")} · 待发布 ${pendingOutbox} · 失败 ${count("failed")} · 未解决警报 ${openAlerts}`;
   } catch (error) {
     $("status").className = "status bad";
-    $("status").textContent = `Control Center 未连接：${error.message || error}`;
+    $("status").textContent = `Control Center 未连接：${error.message || error}\n点击“一键启动协作”可启动本地 Relay。\nExtension ID: ${chrome.runtime.id}`;
     $("queue").textContent = "";
   }
 }
+
+$("startCollab").addEventListener("click", async () => {
+  $("startCollab").disabled = true;
+  $("status").className = "status muted";
+  $("status").textContent = "正在启动本地 Relay、开启自动推进并执行首轮轮询…";
+  try {
+    const result = await startCollaboration();
+    $("diagnostic").textContent = JSON.stringify(result, null, 2);
+    if (!result?.ok) {
+      $("status").className = "status bad";
+      $("status").textContent = `启动失败：${result?.code || result?.error || "unknown"}`;
+      if (result?.registration_command) {
+        try { await navigator.clipboard.writeText(result.registration_command); } catch {}
+      }
+    } else {
+      $("status").className = "status ok";
+      $("status").textContent = "Relay 已启动，自动推进已开启，首轮轮询已执行。";
+    }
+  } finally {
+    $("startCollab").disabled = false;
+    setTimeout(refresh, 300);
+  }
+});
 
 $("auto").addEventListener("change", async () => {
   settings.autoEnabled = $("auto").checked;
@@ -60,7 +150,6 @@ $("run").addEventListener("click", async () => {
   $("diagnostic").textContent = JSON.stringify(result, null, 2);
   setTimeout(refresh, 300);
 });
-
 
 $("submitDecision").addEventListener("click", async () => {
   $("diagnostic").textContent = "读取当前 Session Decision…";
