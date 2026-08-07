@@ -1,5 +1,6 @@
 param(
   [string]$DataRoot = (Join-Path $env:LOCALAPPDATA "SAT2RelayData"),
+  [string]$ExtensionId = "",
   [switch]$SkipTokenPrompt,
   [switch]$NoDesktopShortcut
 )
@@ -12,10 +13,16 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repositoryRoot = Resolve-Path (Join-Path $scriptRoot "..\..")
 $daemonSource = Join-Path $repositoryRoot "daemon"
 $extensionSource = Join-Path $repositoryRoot "extension"
+$nativeSource = Join-Path $scriptRoot "native-host\Sat2RelayNativeHost.cs"
 $tools = Join-Path $programRoot "on-demand"
+$nativeRoot = Join-Path $programRoot "native-host"
 
-if (-not (Test-Path $daemonSource) -or -not (Test-Path $extensionSource)) {
-  throw "Run this script from a complete autoAI checkout. daemon/ or extension/ is missing."
+if (-not (Test-Path $daemonSource) -or -not (Test-Path $extensionSource) -or -not (Test-Path $nativeSource)) {
+  throw "Run this script from a complete Autoai checkout. daemon/, extension/, or native-host source is missing."
+}
+
+if ($ExtensionId -and $ExtensionId -notmatch '^[a-p]{32}$') {
+  throw "ExtensionId must be a 32-character Chromium extension ID (letters a-p)."
 }
 
 # On-demand mode must never retain a legacy logon task.
@@ -32,7 +39,7 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
   } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
-New-Item -ItemType Directory -Force -Path $programRoot, $DataRoot, $tools | Out-Null
+New-Item -ItemType Directory -Force -Path $programRoot, $DataRoot, $tools, $nativeRoot | Out-Null
 if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
   throw "Python launcher 'py' was not found. Install Python 3.11 or later first."
 }
@@ -59,7 +66,26 @@ Set-Content -Path $config -Value $configText -Encoding utf8
 $extensionTarget = Join-Path $programRoot "extension"
 if (Test-Path $extensionTarget) { Remove-Item -Recurse -Force $extensionTarget }
 Copy-Item -Recurse -Force $extensionSource $extensionTarget
-Copy-Item -Force (Join-Path $scriptRoot "START_OR_REPAIR.ps1"), (Join-Path $scriptRoot "STOP_RELAY.ps1"), (Join-Path $scriptRoot "START_OR_REPAIR.cmd"), (Join-Path $scriptRoot "STOP_RELAY.cmd") -Destination $tools
+Copy-Item -Force `
+  (Join-Path $scriptRoot "START_OR_REPAIR.ps1"), `
+  (Join-Path $scriptRoot "STOP_RELAY.ps1"), `
+  (Join-Path $scriptRoot "START_OR_REPAIR.cmd"), `
+  (Join-Path $scriptRoot "STOP_RELAY.cmd"), `
+  (Join-Path $scriptRoot "REGISTER_NATIVE_HOST.ps1") `
+  -Destination $tools
+
+# Compile a tiny one-shot Native Messaging host. It accepts only status and
+# ensure_running and can only invoke the fixed START_OR_REPAIR.ps1 path.
+$nativeExe = Join-Path $nativeRoot "sat2-relay-native-host.exe"
+if (Test-Path $nativeExe) { Remove-Item -Force $nativeExe }
+$nativeCode = Get-Content -Raw $nativeSource
+Add-Type -TypeDefinition $nativeCode -Language CSharp -OutputAssembly $nativeExe -OutputType ConsoleApplication
+if (-not (Test-Path $nativeExe)) { throw "Native Messaging host compilation failed." }
+
+if ($ExtensionId) {
+  & (Join-Path $tools "REGISTER_NATIVE_HOST.ps1") -ExtensionId $ExtensionId
+  if ($LASTEXITCODE -ne 0) { throw "Native Messaging host registration failed." }
+}
 
 if (-not $SkipTokenPrompt) {
   $answer = Read-Host "Store a GitHub fine-grained PAT now? [Y/n]"
@@ -100,3 +126,10 @@ Write-Host ""
 Write-Host "On-demand installation complete. No login scheduled task is registered."
 Write-Host "Extension: $(Join-Path $programRoot 'extension')"
 Write-Host "Local API token (paste once into extension settings): $apiToken"
+if ($ExtensionId) {
+  Write-Host "Native Messaging one-click start: REGISTERED for extension $ExtensionId"
+} else {
+  Write-Host "Native Messaging one-click start: NOT YET PAIRED"
+  Write-Host "After loading/reloading the extension, copy its Extension ID from the popup and run:"
+  Write-Host "  powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $tools 'REGISTER_NATIVE_HOST.ps1')`" -ExtensionId <32-char-extension-id>"
+}
