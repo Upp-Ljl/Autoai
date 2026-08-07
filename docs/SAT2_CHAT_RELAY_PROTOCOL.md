@@ -11,11 +11,12 @@
 ```text
 Relay 2.2 code and local installation: IMPLEMENTED
 Decision JSON / deterministic publishing path: IMPLEMENTED
+extension one-click Windows bootstrap (2.2.1): IMPLEMENTED IN SOURCE / FIELD ACCEPTANCE PENDING
 real Session closed-loop acceptance: PENDING FIELD ACCEPTANCE
 long-term unattended stability: NOT YET CLAIMED
 ```
 
-在完成一次真实的 `Decision JSON → GitHub control comment → next Session Capsule` 闭环前，只能称为“已实现、待现场验收”，不得称为长期稳定验证完成。
+在完成一次真实的 `extension one-click start → Decision JSON → GitHub control comment → next Session Capsule` 闭环前，只能称为“已实现、待现场验收”，不得称为长期稳定验证完成。
 
 ## 1. 权威事实顺序
 
@@ -45,6 +46,14 @@ Browser Extension:
   heartbeat
   Capsule 注入与确认
   检测或手动提交当前 Decision
+  通过受限 Native Messaging host 一键启动本地 Relay
+
+Native Bootstrap Host:
+  仅接受 status / ensure_running
+  仅调用固定 START_OR_REPAIR.ps1 -SkipPoll
+  不读取 GitHub PAT
+  不接受任意命令、脚本路径或 shell 参数
+  每次请求后退出，不常驻
 
 Local Relay:
   GitHub 轮询
@@ -58,9 +67,9 @@ GitHub:
   保存任务、PR、精确 SHA 和正式控制事件
 ```
 
-扩展不得保存 GitHub PAT；Session 不得计算控制字段；Relay 不得作科研判断。
+扩展不得保存 GitHub PAT；Native host 不得接触 GitHub PAT；Session 不得计算控制字段；Relay 不得作科研判断。
 
-## 3. 按需运行
+## 3. 按需运行与一键启动
 
 Windows 登录时：
 
@@ -71,15 +80,28 @@ port 8765: CLOSED
 login scheduled task: NONE
 ```
 
-使用前由用户或本地 Agent运行：
+Native Messaging host 不是后台服务。安装时只落盘一个受限可执行文件并注册到当前 Windows 用户的 Chrome/Edge Native Messaging host 配置；浏览器请求时临时启动，请求完成即退出。
 
-```text
-SAT2 Relay - Start or Repair
+首次加载或更换 unpacked extension ID 后，需要一次本地配对：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:LOCALAPPDATA\SAT2Relay\on-demand\REGISTER_NATIVE_HOST.ps1" `
+  -ExtensionId <当前扩展 ID>
 ```
 
-该入口启动本地 supervisor/daemon、检查健康并执行一次 poll。浏览器扩展在 daemon 已运行时自动 heartbeat 和投递，但当前版本不能在 daemon 完全停止时直接启动 Windows 进程。
+配对完成后的日常首选路径：
 
-停止入口应使 Relay 后台进程和 8765 监听归零。
+```text
+打开 SAT2 Relay 扩展
+→ 点击“一键启动协作”
+→ 若 daemon 离线，Native host 执行 ensure_running
+→ 等待 127.0.0.1:8765 health
+→ 自动推进开关置为 ON
+→ 执行首轮 heartbeat / poll / delivery cycle
+```
+
+桌面 `SAT2 Relay - Start or Repair` 继续作为故障后备。停止入口应使 Relay 后台进程和 8765 监听归零。
 
 ## 4. Guidance Capsule
 
@@ -412,6 +434,9 @@ STALE_PR_HEAD
 TASK_FILE_INVALID
 GITHUB_PERMISSION_DENIED
 GITHUB_PUBLISH_UNCERTAIN
+NATIVE_HOST_UNAVAILABLE
+START_SCRIPT_FAILED
+START_TIMEOUT
 ```
 
 错误信息必须指出故障层、原因和恢复动作，不能只显示 HTTP 500。
@@ -421,7 +446,10 @@ GITHUB_PUBLISH_UNCERTAIN
 启用真实自动推进前，必须至少完成一次：
 
 ```text
-Dashboard 人工授权
+daemon 完全停止
+→ 扩展点击“一键启动协作”
+→ Relay 从 Native host 启动并完成首轮 cycle
+→ Dashboard 人工授权
 → Worker Session 收到 Capsule
 → Worker 输出带 delivery_token 的 Decision JSON
 → Relay 自动发布唯一 checkpoint 评论
@@ -442,6 +470,7 @@ Dashboard 人工授权
 Session 暂时离线后可恢复
 daemon 重启后可恢复
 自动检测失败时可按钮提交
+插件可从 daemon 完全停止状态一键启动协作
 ```
 
 完成现场闭环后可记录“真实闭环验收通过”；在此之前不得宣称长期稳定无人值守运行已经验证。
