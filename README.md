@@ -10,7 +10,7 @@ The Relay transports and validates collaboration decisions; it does not make sci
 
 - `daemon/` — Python loopback daemon, SQLite recovery state, GitHub client, dashboard, schemas, and tests.
 - `extension/` — Chrome/Edge Manifest V3 extension.
-- `scripts/windows/` — supported Windows **on-demand** installer and Start/Stop scripts.
+- `scripts/windows/` — supported Windows **on-demand** installer, Start/Stop scripts, and bounded Native Messaging bootstrap host.
 - `sat2AI协作方式.md` — project collaboration policy, updated for Relay 2.2.
 - `docs/SAT2_CHAT_RELAY_PROTOCOL.md` — current closed-loop Session/Relay protocol.
 - `docs/RELAY_2.2_OPERATION.md` — exact local operating procedure.
@@ -26,18 +26,42 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -DataRoot "D:\SAT2RelayData"
 ```
 
-The installer creates `%LOCALAPPDATA%\SAT2Relay` for the program and configuration, and puts SQLite and logs under `DataRoot`. It removes legacy Relay scheduled tasks, creates desktop Start/Stop shortcuts, and starts Relay once for initial extension setup. It does not register a login startup task.
+The installer creates `%LOCALAPPDATA%\SAT2Relay` for the program and configuration, and puts SQLite and logs under `DataRoot`. It removes legacy Relay scheduled tasks, creates desktop Start/Stop shortcuts, compiles the bounded Native Messaging host, and starts Relay once for initial extension setup. It does not register a login startup task.
 
 Load the unpacked extension from `%LOCALAPPDATA%\SAT2Relay\extension`. Configure `http://127.0.0.1:8765`, paste the local API token printed by the installer, and bind each role to a concrete ChatGPT `/c/<conversation-id>` page.
 
-Daily use:
+### One-time browser/native pairing
+
+The extension can start the Windows Relay only after its current Chromium extension ID is registered with the local Native Messaging host. The popup always shows the current Extension ID. Run once after loading/reloading the unpacked extension:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:LOCALAPPDATA\SAT2Relay\on-demand\REGISTER_NATIVE_HOST.ps1" `
+  -ExtensionId <32-character-extension-id>
+```
+
+`INSTALL_ON_DEMAND.ps1` also accepts `-ExtensionId <id>` when the ID is already known. Registration is per-user under the Chrome and Edge Native Messaging host registry keys. The host accepts only `status` and `ensure_running`; it cannot execute arbitrary commands and never receives the GitHub PAT.
+
+## Daily use
+
+Primary path:
+
+```text
+Open SAT2 Relay extension
+→ click “一键启动协作”
+→ Native host starts Relay if needed
+→ extension enables automatic progression
+→ first heartbeat / poll / delivery cycle runs
+```
+
+Desktop fallback remains available:
 
 ```text
 SAT2 Relay - Start or Repair  → start supervisor, health check, poll once
 SAT2 Relay - Stop             → stop all Relay processes
 ```
 
-The extension cannot cold-start Windows processes while Relay is off; Native Messaging is intentionally not part of this release.
+Windows login still starts no Relay process. The Native Messaging helper is launched only when the extension explicitly requests it and exits after servicing the request.
 
 ## Session contract
 
@@ -53,6 +77,6 @@ Initial task authorization and `MENTOR_ACCEPTED` remain local human-confirmation
 
 ## Acceptance status
 
-The bundled 2.2 unit checks are retained in the source tree. A fresh Windows installation still requires real-session acceptance: bind unique Mentor and Worker endpoints, run Deep Doctor, then verify one Decision JSON is published and routed exactly once.
+The 2.2 closed-loop code and the 2.2.1 one-click bootstrap path are implemented in source. A fresh Windows installation still requires real-session acceptance: register the current extension ID with the Native Messaging host, click “一键启动协作”, verify Deep Doctor, then verify one Decision JSON is published and routed exactly once.
 
 Until that real round trip is observed, describe the deployment as implemented and ready for field acceptance, not as long-term unattended operation already validated.
