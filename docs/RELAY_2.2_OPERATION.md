@@ -10,6 +10,7 @@ unique role/session binding: IMPLEMENTED
 GitHub inbound event → Session Capsule: IMPLEMENTED
 Session Decision JSON → deterministic GitHub comment: IMPLEMENTED
 bidirectional role routing: IMPLEMENTED
+extension one-click local bootstrap: IMPLEMENTED IN SOURCE / FIELD ACCEPTANCE PENDING
 real Session closed-loop acceptance: PENDING FIELD ACCEPTANCE
 long-term unattended stability: NOT YET CLAIMED
 ```
@@ -20,17 +21,42 @@ long-term unattended stability: NOT YET CLAIMED
 
 Windows 登录时不启动 Relay，不注册登录计划任务，不监听 8765。
 
-使用前运行桌面入口：
+### 2.1 首选：扩展一键启动协作
+
+一次性安装/更新后，先把当前 Chromium extension ID 注册给本机 Native Messaging host：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:LOCALAPPDATA\SAT2Relay\on-demand\REGISTER_NATIVE_HOST.ps1" `
+  -ExtensionId <popup 显示的 32 位 Extension ID>
+```
+
+注册完成后，日常只需打开扩展并点击：
+
+```text
+一键启动协作
+```
+
+该按钮按固定顺序执行：
+
+```text
+1. 检查 127.0.0.1:8765 Relay 是否在线
+2. 若离线，调用受限 Native Messaging host 的 ensure_running
+3. Native host 只调用固定 START_OR_REPAIR.ps1 -SkipPoll
+4. 等待 daemon health 可用
+5. 打开扩展“自动推进”
+6. 执行一次 heartbeat / poll / delivery cycle
+7. 返回 Doctor 与启动诊断结果
+```
+
+Native host 只允许 `status` 和 `ensure_running`，不能执行任意命令，也不读取 GitHub PAT。
+
+### 2.2 桌面故障后备
+
+仍保留：
 
 ```text
 SAT2 Relay - Start or Repair
-```
-
-它负责启动 supervisor/daemon、健康检查和一次即时轮询。浏览器扩展在 daemon 在线后自动 heartbeat、领取和投递。
-
-停止时运行：
-
-```text
 SAT2 Relay - Stop
 ```
 
@@ -42,7 +68,7 @@ Relay processes: NONE
 login scheduled task: NONE
 ```
 
-当前扩展不能在 daemon 完全停止时直接启动 Windows 进程；这不是投递失败，而是按需运行边界。
+Native Messaging helper 本身不是常驻服务；浏览器发起一次请求时启动，完成请求后退出。
 
 ## 3. Session 绑定
 
@@ -128,7 +154,10 @@ GitHub POST 状态不确定时进入 `PUBLISH_UNCERTAIN`，Relay 先按稳定 ev
 正式依赖自动推进前，至少完成一次：
 
 ```text
-Dashboard 授权
+扩展点击“一键启动协作”
+→ daemon 从完全停止状态成功启动
+→ Dashboard/Doctor healthy
+→ Dashboard 授权
 → Worker 收到 Capsule
 → Worker Decision 自动发布 checkpoint
 → Mentor 自动收到 review Capsule
@@ -145,4 +174,5 @@ no cross-role delivery
 endpoint offline recovery works
 daemon restart recovery works
 manual Decision button works
+one-click bootstrap works after full daemon stop
 ```
