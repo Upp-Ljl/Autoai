@@ -1,178 +1,200 @@
-# Relay 2.2 operating protocol
+# Relay 2.2.2 operating protocol
 
-本文件是 [`SAT2_CHAT_RELAY_PROTOCOL.md`](SAT2_CHAT_RELAY_PROTOCOL.md) 的本地运行补充。发生冲突时，以该协议、SAT2 当前任务 YAML、PR 和精确 SHA 为准。旧版 Relay 2.0 文档只作历史记录。
+本文件是 [`SAT2_CHAT_RELAY_PROTOCOL.md`](SAT2_CHAT_RELAY_PROTOCOL.md) 的本地运行补充。SAT2 当前 Mentor task YAML、PR 和 exact SHA 是任务事实源。
 
-## 1. 当前能力与验收状态
+## 1. 当前模型
+
+正常路径已经改为：
+
+```text
+Mentor 写完整 task 文档
+→ Relay 自动校验并 dispatch
+→ Worker 按文档完成
+→ Worker checkpoint 自动回 Mentor
+→ Mentor 按同一 task contract 验收
+→ changes-required 自动回 Worker，accepted 自动完成
+→ 下一份依赖满足的 task 文档自动启动
+```
+
+不再需要 Dashboard“首次任务授权”，也不再要求 `MENTOR_ACCEPTED` 的机械二次确认。高风险动作仍只受 task 文档 `human_gates` 与 SAT2 科研治理约束。
+
+当前状态：
 
 ```text
 on-demand Windows installation: IMPLEMENTED
 unique role/session binding: IMPLEMENTED
-GitHub inbound event → Session Capsule: IMPLEMENTED
-Session Decision JSON → deterministic GitHub comment: IMPLEMENTED
-bidirectional role routing: IMPLEMENTED
-extension one-click local bootstrap: IMPLEMENTED IN SOURCE / FIELD ACCEPTANCE PENDING
-real Session closed-loop acceptance: PENDING FIELD ACCEPTANCE
+Mentor task-contract validation: IMPLEMENTED IN SOURCE
+automatic document dispatch: IMPLEMENTED IN SOURCE
+Worker → Mentor checkpoint relay: IMPLEMENTED IN SOURCE
+Mentor → Worker changes relay: IMPLEMENTED IN SOURCE
+Mentor accepted → COMPLETE: IMPLEMENTED IN SOURCE
+bound Session reply notification: IMPLEMENTED IN SOURCE
+real Windows/ChatGPT closed-loop acceptance: PENDING FIELD ACCEPTANCE
 long-term unattended stability: NOT YET CLAIMED
 ```
 
-当前可以写“已实现、待真实闭环验收”，不能写“长期稳定无人值守已验证”。
+## 2. 日常开始协作
 
-## 2. 日常启动与停止
-
-Windows 登录时不启动 Relay，不注册登录计划任务，不监听 8765。
-
-### 2.1 首选：扩展一键启动协作
-
-一次性安装/更新后，先把当前 Chromium extension ID 注册给本机 Native Messaging host：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File "$env:LOCALAPPDATA\SAT2Relay\on-demand\REGISTER_NATIVE_HOST.ps1" `
-  -ExtensionId <popup 显示的 32 位 Extension ID>
-```
-
-注册完成后，日常只需打开扩展并点击：
+Windows 登录时 Relay 不常驻。第一次安装/扩展 ID 改变后注册一次 Native Messaging host；以后日常：
 
 ```text
-一键启动协作
+打开已绑定的 Mentor / Worker ChatGPT Session
+→ 打开 SAT2 Relay 插件
+→ 点击“一键启动协作”
 ```
 
-该按钮按固定顺序执行：
+按钮执行：
 
 ```text
-1. 检查 127.0.0.1:8765 Relay 是否在线
-2. 若离线，调用受限 Native Messaging host 的 ensure_running
-3. Native host 只调用固定 START_OR_REPAIR.ps1 -SkipPoll
-4. 等待 daemon health 可用
-5. 打开扩展“自动推进”
-6. 执行一次 heartbeat / poll / delivery cycle
-7. 返回 Doctor 与启动诊断结果
+检查 127.0.0.1:8765
+→ 必要时 Native host ensure_running
+→ 等待 daemon healthy
+→ 自动推进 ON
+→ heartbeat
+→ poll
+→ 自动恢复 pending outbox / delivery
+→ 自动扫描 enabled task documents
 ```
 
-Native host 只允许 `status` 和 `ensure_running`，不能执行任意命令，也不读取 GitHub PAT。
+文档完整且可执行时直接 dispatch，不再等待用户“授权任务”。
 
-### 2.2 桌面故障后备
+## 3. Mentor task 文档开工条件
 
-仍保留：
+Relay 开工前至少机器校验：
 
 ```text
-SAT2 Relay - Start or Repair
-SAT2 Relay - Stop
+task_id/title/status
+repository/pr_number/worker_role
+purpose 或 objective
+acceptance criteria 非空
+allowed_paths
+forbidden_paths 字段
+human_gates 字段
+PR open
+base/branch 一致
+依赖满足
+无 active write-scope conflict
 ```
 
-停止后应满足：
+第一次 dispatch 冻结 task document SHA-256。后续 checkpoint/review 必须仍对应同一合同；中途修改验收标准会 fail closed。
 
-```text
-Relay processes: NONE
-127.0.0.1:8765 listener: NONE
-login scheduled task: NONE
-```
+## 4. Worker / Mentor Session 输出
 
-Native Messaging helper 本身不是常驻服务；浏览器发起一次请求时启动，完成请求后退出。
+Worker 正常完成时：
 
-## 3. Session 绑定
-
-- 只绑定具体 `https://chatgpt.com/c/<conversation-id>` 页面；
-- 不绑定项目主页、新建聊天页或不确定 URL；
-- 一个会话默认只绑定一个角色；
-- 一个角色默认只保留一个 active endpoint；
-- Mentor、Worker 等角色必须分别完成 GitHub 能力可读性验证；
-- Deep Doctor 必须显示无重复绑定、无角色歧义和新鲜 heartbeat。
-
-目标 endpoint 未绑定、标签页关闭或 heartbeat 过期时，delivery 保持：
-
-```text
-WAITING_FOR_ENDPOINT
-```
-
-它不会仅因 endpoint 暂时不可用而成为永久失败。
-
-## 4. Session Decision
-
-收到 Relay Capsule 后，Session 完成人类可读报告，并在末尾输出：
-
-````markdown
-<!-- SAT2_RELAY_DECISION -->
 ```json
-{
-  "delivery_token": "从当前 Capsule 原样复制",
-  "decision": "WORKER_CHECKPOINT",
-  "summary": "已完成当前受限任务，等待 Mentor 审查。"
-}
-```
-````
-
-Session 不得手写 Relay YAML，也不得填写 task、PR、SHA、parent、actor、target、event ID 或 timestamp。
-
-扩展自动检测最新完整 assistant message。自动检测失败时，使用“提交当前 Decision”按钮；该按钮走同一 token、角色、状态、SHA、去重和 outbox 路径，不需要复制内容。
-
-## 5. GitHub 写权限
-
-新安装默认：
-
-```text
-github.allow_writes: false
+{"delivery_token":"当前 Capsule token","decision":"WORKER_CHECKPOINT","summary":"按任务合同完成当前候选，等待 Mentor 验收。"}
 ```
 
-只有在以下条件通过后才启用：
+Mentor 未通过：
 
-```text
-Deep Doctor passed
-Mentor endpoint present
-Worker endpoint present
-no duplicate role/session binding
-private repository read passed
-current task/config read passed
+```json
+{"delivery_token":"当前 Capsule token","decision":"MENTOR_CHANGES_REQUIRED","summary":"列出仍未满足的验收项。"}
 ```
 
-启用写权限只允许 Relay 发布通过本地闸门的低风险控制评论。它不授权 merge、workflow dispatch、qualification、formal experiment、registry/seed/evidence 或论文变更。
+Mentor 通过：
 
-首次任务授权通过 Dashboard 的“授权任务”按钮完成；Relay 自动读取 task、PR 和当前 head。`MENTOR_ACCEPTED` 默认需要一次本地人工确认。
+```json
+{"delivery_token":"当前 Capsule token","decision":"MENTOR_ACCEPTED","summary":"当前 exact head 满足任务合同的全部适用验收标准。"}
+```
 
-## 6. 发布恢复与去重
+Session 不写 Relay YAML、SHA、parent、actor、target 或 event ID。
 
-同一 Decision 的去重至少绑定：
+## 5. 双向传递保障
+
+Mentor → Worker：GitHub event 固定路由到 `task.worker_role`；delivery 只能由对应 fresh role endpoint lease；注入后必须在具体 conversation transcript 看到精确 delivery marker 才算 DELIVERED。
+
+Worker → Mentor：Decision 必须同时匹配 delivery token、绑定 conversation、endpoint role 和当前 delivery；Relay 发布前重新读取 current PR head，自动生成 checkpoint SHA/parent/target；checkpoint GitHub event 固定路由到 Mentor。
+
+没有目标 endpoint 时等待，不跨角色投递，也不把 endpoint 离线当科学失败。
+
+## 6. 去重与恢复
+
+同一：
 
 ```text
 task_id + delivery_id + assistant_message_hash + decision + current_head
 ```
 
-GitHub POST 状态不确定时进入 `PUBLISH_UNCERTAIN`，Relay 先按稳定 event marker 搜索现有评论，确认不存在后才重试。Daemon 重启后恢复 pending outbox 和 delivery，不要求 Session 重发 Decision。
+只允许一条 outbox/control comment。GitHub POST 不确定时先按 stable marker 搜索已有评论，再决定是否重试。Daemon 重启恢复 pending outbox/delivery。
 
-## 7. STALE_PR_HEAD
+## 7. STALE_PR_HEAD 与合同漂移
 
-每次发布前 Relay 必须重新读取 PR 当前 head：
+Worker checkpoint：candidate/control SHA 必须等于发布前 freshly-read PR head。
 
-- Worker checkpoint 的 candidate/control SHA 必须等于当前 head；
-- Mentor review 的 reviewed SHA 必须等于被投递 checkpoint SHA；
-- Mentor 审查期间 head 变化时返回 `STALE_PR_HEAD` 并拒绝发布。
+Mentor review：reviewed SHA、checkpoint candidate SHA、fresh PR head 必须相同。
 
-恢复动作是 Mentor 重新读取最新 diff 和新的 review Capsule，不是修改旧 Decision 或手写 YAML。
+不一致返回 `STALE_PR_HEAD`。
 
-## 8. 现场闭环验收
+执行过程中 task 文档 hash 改变返回 `TASK_SPEC_CHANGED_DURING_EXECUTION`；不得静默换验收口径。
 
-正式依赖自动推进前，至少完成一次：
+## 8. 绑定 Session 回复完成提醒
+
+插件新增独立开关：
 
 ```text
-扩展点击“一键启动协作”
-→ daemon 从完全停止状态成功启动
-→ Dashboard/Doctor healthy
-→ Dashboard 授权
+绑定 Session 回复完成提醒
+```
+
+该功能不依赖“自动推进”。关闭自动推进后仍可使用。
+
+行为：
+
+```text
+绑定的 ChatGPT Session 完成 assistant 回复
+→ watcher 等待生成停止且文本稳定
+→ 独立 extension Port 通知 background
+→ background 核对 conversation 确实绑定某个 role
+→ 同一回复去重
+→ Chrome / Edge 弹出“SAT2 <role> 回复完成”
+→ 点击通知回到对应标签页
+```
+
+未绑定 Session 不通知；页面首次加载不会为旧回复补发；此提醒不会生成 GitHub 事件，也不会推进 Protocol State。
+
+## 9. Human gates
+
+Relay 自动推进不等于自动执行：
+
+```text
+merge / mark ready
+workflow dispatch
+qualification / formal experiment
+registry / seed / accepted-evidence change
+paper claim / number change
+force push / base retarget / scope expansion
+```
+
+这些仍以 task 文档和 SAT2 科研治理为准。
+
+## 10. 现场验收
+
+至少现场跑通一次：
+
+```text
+Relay 完全停止
+→ 插件一键启动
+→ 自动发现完整 Mentor task 文档
 → Worker 收到 Capsule
-→ Worker Decision 自动发布 checkpoint
-→ Mentor 自动收到 review Capsule
-→ Mentor Decision 自动发布并回到 Worker
+→ Worker checkpoint 自动到 GitHub
+→ Mentor 收到 Capsule
+→ Mentor changes-required 自动回 Worker
+→ Worker 第二 checkpoint 自动回 Mentor
+→ Mentor accepted 自动 COMPLETE
 ```
 
-验收必须确认：
+并验证：
 
 ```text
-no handwritten YAML
-no manual SHA / parent copy
-no duplicate GitHub comment
-no cross-role delivery
-endpoint offline recovery works
-daemon restart recovery works
-manual Decision button works
-one-click bootstrap works after full daemon stop
+0 手写 YAML/SHA/parent/target
+0 跨角色投递
+0 重复评论
+错误 token 被拒绝
+endpoint 离线可恢复
+daemon 重启可恢复
+STALE_PR_HEAD fail closed
+task contract 漂移 fail closed
+自动推进 OFF 时回复完成提醒仍弹出
 ```
+
+在这条真实 Windows + ChatGPT 闭环完成前，不宣称长期稳定无人值守已验证。
