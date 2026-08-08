@@ -1,5 +1,11 @@
-# Historical Relay 2.0 documents
+# Historical Relay protocol snapshots
 
-The files in this directory were packaged as Relay 2.0 repository-side protocol material. They are retained for traceability, not as the current operating contract.
+The files in this directory were packaged as Relay v1/v2.0 repository-side protocol material. They are retained for traceability and migration archaeology, not as the current operating contract.
 
-For Relay 2.2, follow [`../RELAY_2.2_OPERATION.md`](../RELAY_2.2_OPERATION.md) and the updated `sat2AI协作方式.md`. In particular, do not follow any historical instruction that tells a ChatGPT Session to handwrite a Relay YAML event block or expects a login-start scheduled task.
+Current Relay 2.2.2 rules are authoritative only at:
+
+- [`../SAT2_CHAT_RELAY_PROTOCOL.md`](../SAT2_CHAT_RELAY_PROTOCOL.md)
+- [`../RELAY_2.2_OPERATION.md`](../RELAY_2.2_OPERATION.md)
+- [`../RELAY_2.2_ACCEPTANCE.md`](../RELAY_2.2_ACCEPTANCE.md)
+
+Do not follow historical instructions that tell a ChatGPT Session to handwrite Relay YAML, require a separate user authorization after a complete Mentor task document exists, make `WORKER_ACK` a blocking step, require a mechanical second confirmation for validated `MENTOR_ACCEPTED`, or expect a login-start scheduled task.
