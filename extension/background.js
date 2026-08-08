@@ -1,8 +1,6 @@
 import {canonicalChatUrl, daemonFetch, loadSettings, parseConversationKey, pruneHistory, saveSettings} from "./lib.js";
 
-const ALARM = "sat2-relay-cycle"; /*
-const NOTIFICATION_ICON = chrome.runtime.getURL("icon128.png");base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAD+UlEQVR4nO2dQU7dQBBEhygnYMU6Qiy5/zlYI65CNmnJcmx/M9M9XT1Vb5kg/rjrTX3bH8zT88vbdxO0/MpegMhFApAjAciRAORIAHIkADkSgBwJQI4EIEcCkCMByJEA5EgAcn5nL+Dr8yN7Cen8eX1Pe+2njI+DFfo5s2WYJoBC/zkzZJhyDqDw+5gxt9AGUPB+RLVBmAB3w888AUIhc1YhAjw6IIV+zuzZuQtwdQAK/j6z5uh6Eqjw/bial+e5lZsACt+fGRKEXwYq/DGi5+ciwJmNCt+Hszl6tMCwAAp/DlEShLwFKPwYIuaqj4PJGRLgqH6q7P792qvctj6a78ja038eYDZXw7L/qyKxBzRvAV+fH6e7/ujfqzTCKN23gqvUv0eQVY6rZ51LN4DXLl65DZY8B4gIbNXzg6UEmLFTVxNhCQEyKnoVEUoLgPDeXF2EkgIgBL+nqgilrgI8rs8fBTQaYLV7CCUaYPa1vH3tyOtWaQT4Bsi8keMRHnobwDYAyh281dsATgCU4M++52oiwAiAGvzZa6wiQroAVYI/e83qIqQLMALCDvIQIZP0q4CeEP+8vkOEv6V3TdnHUaoBsod1h2qNkN4Ard0LtkL4W6ocE3wDIAyplwptANEArf0fNOL7fC9Hx4JybHANgDKYCBAbAaYBWls7/C1IxwklgJiPBCBHApAjAciRAORIAHIkADkSgBwJQI4EIEcCkCMByJEA5EgAciQAORKAHAlAjgQgRwKQIwHIkQDkSAByJAA5cAIg/dJEBGjHB/ebQa1hPDjBG7TgDagGWPG5/Vd/pwAByAbYU7ERkEK+AqYB7gysylArHUuJBtiC3AYoof4EiAboGRzS+UHvWhDWX64B9mQ2AkKAo0AIUO2Ze1WfbXgEhAAGuggrBW9ACWCgibBi8AakAEa2CCsHb0BcBTwiYxczhN8aeANs8WyD0a95RIXgjTICGIiPWjMqBW+UE8BAEqFi8EZZAYxMESoHb5QXwJgpwgrBG8sIYESKsFLwxnICGJ4irBi80X0f4GgoCCdke0bDQwz/aM6961y2Abb0tAFi8BGUuBPoxZ3n9q/0dwruMCRAlbeBPWciVAjes/5bI2uAPTa4CsFHESJAhRaoSMRchwU42z2SwJezeY62l0sDSIJYosJvbcI5gCQYI3p+bgJc2SgJ+riam9eJq2sDSAI/ZoTfWmtPzy9v327f7R+Pwma+7HrE7NmFCNDa/R0vGXJnFSZAa6p9T6I2SqgAhkToJ7ohp9wKVs33MWNuUxpgjxrhnNmbJUWALZIhtyHTBRC5UH8cLCQAPRKAHAlAjgQgRwKQIwHIkQDkSAByJAA5EoAcCUDOX5HYy1YYL6iWAAAAAElFTkSuQmCC";
-*/
+const ALARM = "sat2-relay-cycle";
 const NOTIFICATION_ICON = chrome.runtime.getURL("icon128.png");
 const FIXED_RETRYABLE_CODES = new Set([
   "SESSION_BUSY",
@@ -25,8 +23,8 @@ async function configureAlarm() {
   await chrome.alarms.create(ALARM, {delayInMinutes: 0.1, periodInMinutes: 0.5});
 }
 
-chrome.runtime.onInstalled.addListener(() => configureAlarm().then(() => runCycle({force: true})).catch(() => {}));
-chrome.runtime.onStartup.addListener(() => configureAlarm().then(() => runCycle({force: true})).catch(() => {}));
+chrome.runtime.onInstalled.addListener(() => configureAlarm().then(() => runCycle()).catch(() => {}));
+chrome.runtime.onStartup.addListener(() => configureAlarm().then(() => runCycle()).catch(() => {}));
 configureAlarm().catch(() => {});
 
 async function notify(title, message) {
@@ -136,7 +134,6 @@ async function reportResult(settings, deliveryId, result) {
   return daemonFetch(settings, `/api/v2/deliveries/${deliveryId}/result`, {method: "POST", body: result});
 }
 
-
 async function sha256Hex(text) {
   const bytes = new TextEncoder().encode(String(text || ""));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -186,7 +183,7 @@ async function submitDetectedDecision(settings, context, found, manual = false) 
   if (found.decision.decision === "WORKER_ACK") context.ackSubmitted = true;
   else context.completedAt = new Date().toISOString();
   await saveSettings(settings);
-  await notify("SAT2 Relay decision submitted", `${context.role}: ${found.decision.decision}${result?.waiting_for_human ? " · 等待人工确认" : ""}`);
+  await notify("SAT2 Relay decision submitted", `${context.role}: ${found.decision.decision}`);
   return {submitted: true, decision: found.decision.decision, result};
 }
 
@@ -304,8 +301,10 @@ export async function runCycle({force = false} = {}) {
     const settings = await loadSettings();
     if (!settings.daemonToken) return {skipped: "not_paired"};
     const heartbeatResult = await heartbeat(settings);
+    if (!settings.autoEnabled && !force) {
+      return {skipped: "disabled", heartbeat: heartbeatResult, decisions: [], results: []};
+    }
     const decisionsBefore = await captureDecisions(settings);
-    if (!settings.autoEnabled && !force) return {skipped: "disabled", heartbeat: heartbeatResult, decisions: decisionsBefore};
     const results = [];
     for (let i = 0; i < 20; i += 1) {
       const result = await processOne(settings);
