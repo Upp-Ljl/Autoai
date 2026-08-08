@@ -126,10 +126,6 @@ class RelayService:
         if self.repo_config.process_existing_events_on_first_poll:
             self.db.set_meta(key, datetime.now(UTC).isoformat())
             return False
-        # An explicit start boundary is authoritative. Baseline only comments at
-        # or before that boundary and process newer comments in the same first
-        # poll. This prevents a freshly installed daemon from swallowing the
-        # first authorization that was posted after the reviewed boundary.
         if monitor.start_after_comment_id:
             for comment in comments:
                 if int(comment["id"]) <= monitor.start_after_comment_id:
@@ -222,7 +218,7 @@ class RelayService:
                 "token_source": getattr(self.github, "token_source", "unknown"),
                 "token_fingerprint": getattr(self.github, "token_fingerprint", None),
                 "github_error": str(exc),
-                "recovery": "Fix task_ref/path or reload credentials; the same comment will be replayed automatically.",
+                "recovery": "Fix task_ref/path or reload credentials; the same task document will be retried automatically.",
             }
             raise TaskSpecUnavailable(json.dumps(context, ensure_ascii=False, sort_keys=True)) from exc
         digest = hashlib.sha256(text.encode()).hexdigest()
@@ -253,6 +249,65 @@ class RelayService:
         self.db.set_meta(f"task_spec:{monitor.task_id}:sha256", digest)
         return TaskSpecResolution(monitor.task_file, ref, text, digest, document)
 
+    @staticmethod
+    def _nonempty_sequence(value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, list):
+            return bool(value) and all(bool(str(item).strip()) for item in value)
+        return False
+
+    def validate_task_spec_ready(
+        self,
+        monitor: RepoMonitor,
+        pr: dict[str, Any],
+        task_spec: TaskSpecResolution | None = None,
+    ) -> TaskSpecResolution:
+        """Validate the Mentor-authored document as an executable task contract.
+
+        A valid, enabled task document is the authorization. Relay does not ask
+        the user for a second approval. Ambiguous/incomplete documents fail
+        closed before any Worker Capsule is created.
+        """
+        resolved = task_spec or self.load_task_spec(monitor, pr)
+        doc = resolved.document
+        status = str(doc.get("status") or "").strip()
+        if not status:
+            raise TaskSpecInvalid("task specification requires an explicit status")
+        upper_status = status.upper()
+        inactive_tokens = {"DRAFT", "PAUSED", "BLOCKED", "CANCELLED", "CANCELED", "COMPLETE", "COMPLETED", "ARCHIVED"}
+        if any(token in upper_status for token in inactive_tokens):
+            raise TaskSpecInvalid(f"task status {status!r} is not executable")
+        if not str(doc.get("title") or "").strip():
+            raise TaskSpecInvalid("task specification requires a non-empty title")
+        purpose = doc.get("purpose") or doc.get("objective")
+        if not self._nonempty_sequence(purpose):
+            raise TaskSpecInvalid("task specification requires non-empty purpose/objective entries")
+        acceptance = doc.get("acceptance") or doc.get("acceptance_criteria")
+        if not self._nonempty_sequence(acceptance):
+            raise TaskSpecInvalid("task specification requires non-empty acceptance criteria before dispatch")
+        if not doc.get("allowed_paths") or not monitor.allowed_paths:
+            raise TaskSpecInvalid("task specification requires explicit allowed_paths")
+        if "forbidden_paths" not in doc or not isinstance(doc.get("forbidden_paths"), list):
+            raise TaskSpecInvalid("task specification requires explicit forbidden_paths, even when the list is empty")
+        if "human_gates" not in doc or not isinstance(doc.get("human_gates"), list):
+            raise TaskSpecInvalid("task specification requires explicit human_gates")
+        base_sha = str(doc.get("base_sha") or "")
+        current_base = str((pr.get("base") or {}).get("sha") or "")
+        if base_sha and base_sha != current_base:
+            raise TaskSpecInvalid(f"task base_sha {base_sha} differs from current PR base {current_base}")
+        base_branch = str(doc.get("base_branch") or "")
+        current_base_branch = str((pr.get("base") or {}).get("ref") or "")
+        if base_branch and current_base_branch and base_branch != current_base_branch:
+            raise TaskSpecInvalid(
+                f"task base_branch {base_branch} differs from current PR base branch {current_base_branch}"
+            )
+        branch = str(doc.get("branch") or "")
+        current_head_branch = str((pr.get("head") or {}).get("ref") or "")
+        if branch and current_head_branch and branch != current_head_branch:
+            raise TaskSpecInvalid(f"task branch {branch} differs from current PR head branch {current_head_branch}")
+        return resolved
+
     def _validate_monitor_contract(
         self,
         monitor: RepoMonitor,
@@ -260,15 +315,30 @@ class RelayService:
         changed_files: list[str],
         event: RelayEvent,
     ) -> TaskSpecResolution | None:
+        task_events = {
+            EventType.TASK_AUTHORIZED,
+            EventType.WORKER_CHECKPOINT,
+            EventType.MENTOR_CHANGES_REQUIRED,
+            EventType.MENTOR_ACCEPTED,
+            EventType.TASK_BLOCKED,
+        }
         task_spec = None
-        if event.event_type is EventType.TASK_AUTHORIZED:
-            task_spec = self.load_task_spec(monitor, pr)
-            if event.task_spec_sha256 and event.task_spec_sha256 != task_spec.sha256:
+        if event.event_type in task_events:
+            task_spec = self.validate_task_spec_ready(monitor, pr)
+            contract_key = f"task_contract:{monitor.task_id}:sha256"
+            frozen = self.db.get_meta(contract_key)
+            if event.event_type is EventType.TASK_AUTHORIZED:
+                if event.task_spec_sha256 and event.task_spec_sha256 != task_spec.sha256:
+                    raise TaskSpecInvalid(
+                        f"event task_spec_sha256 mismatch: event {event.task_spec_sha256}, resolved {task_spec.sha256}"
+                    )
+                self._validate_dependencies(monitor)
+                self._validate_scope_conflicts(monitor)
+            elif frozen and frozen != task_spec.sha256:
                 raise TaskSpecInvalid(
-                    f"event task_spec_sha256 mismatch: event {event.task_spec_sha256}, resolved {task_spec.sha256}"
+                    f"TASK_SPEC_CHANGED_DURING_EXECUTION: frozen {frozen}, current {task_spec.sha256}. "
+                    "Create a new task/rebaseline instead of silently changing acceptance criteria."
                 )
-            self._validate_dependencies(monitor)
-            self._validate_scope_conflicts(monitor)
         if event.event_type in {EventType.WORKER_CHECKPOINT, EventType.MENTOR_CHANGES_REQUIRED, EventType.MENTOR_ACCEPTED}:
             violations = [
                 path
@@ -299,9 +369,6 @@ class RelayService:
         event.source_actor = str((comment.get("user") or {}).get("login") or "")
         validate_actor_semantics(event, monitor)
         if suppress_delivery:
-            # Historical recovery may replay a previously valid checkpoint
-            # after the PR has advanced. It remains fail-closed: every SHA
-            # named by the event must still belong to this PR's commit chain.
             historical_shas = {
                 value
                 for value in (event.control_head_sha, event.candidate_sha, event.reviewed_sha, event.authorized_sha, event.base_sha)
@@ -312,7 +379,7 @@ class RelayService:
                 raise ValueError(f"history replay SHA is not in PR commit chain: {sorted(missing_shas)}")
         else:
             validate_pr_binding(event, pr, commit_shas)
-        self._validate_monitor_contract(monitor, pr, changed_files, event)
+        task_spec = self._validate_monitor_contract(monitor, pr, changed_files, event)
         previous = self.db.task_state(event.task_id)
         validate_transition(
             event,
@@ -323,7 +390,20 @@ class RelayService:
         mode = self.effective_mode()
         marker = delivery_marker(event, target) if target else None
         delivery_token = secrets.token_urlsafe(24) if target else None
-        capsule = build_execution_capsule(event, target, marker, monitor, delivery_token) if target else None
+        contract_sha = task_spec.sha256 if task_spec else self.db.get_meta(f"task_contract:{monitor.task_id}:sha256")
+        capsule = (
+            build_execution_capsule(
+                event,
+                target,
+                marker,
+                monitor,
+                delivery_token,
+                task_spec.document if task_spec else None,
+                contract_sha,
+            )
+            if target
+            else None
+        )
         new_state = transition_name(event)
         state_sha = event.candidate_sha or event.reviewed_sha or event.authorized_sha or event.base_sha
         dispatch = mode is not RelayMode.SHADOW and not suppress_delivery
@@ -342,19 +422,26 @@ class RelayService:
         )
         if not inserted:
             return False, False
+        if event.event_type is EventType.TASK_AUTHORIZED and task_spec:
+            self.db.set_meta(f"task_contract:{monitor.task_id}:sha256", task_spec.sha256)
+            self.db.set_meta(f"task_contract:{monitor.task_id}:path", task_spec.path)
+            self.db.set_meta(f"task_contract:{monitor.task_id}:ref", task_spec.ref or "<default-branch>")
         if mode is RelayMode.SHADOW and target:
             self.db.add_alert("info", "SHADOW_DISPATCH", f"Would dispatch {event.event_id} to {target}", event.task_id, event.pr_number)
         if event.event_type in {EventType.HUMAN_GATE, EventType.TASK_BLOCKED, EventType.RELAY_ALERT}:
             self._alert("warning", event.event_type.value, event.summary or "Task requires intervention", event.task_id, event.pr_number)
         self.db.resolve_alerts(code="TASK_SPEC_UNAVAILABLE", task_id=event.task_id, pr_number=event.pr_number)
         self.db.resolve_alerts(code="PROTOCOL_OR_STATE_INVALID", task_id=event.task_id, pr_number=event.pr_number)
+        self.db.resolve_alerts(code="TASK_DOCUMENT_NOT_READY", task_id=event.task_id, pr_number=event.pr_number)
         return True, delivery_id is not None
 
     def poll_once(self) -> dict[str, int]:
         self.refresh_config()
         assert self.repo_config is not None
-        from .decisions import DecisionEngine
-        outbox_counts = DecisionEngine(self, self.db).recover()
+        from .decisions import DecisionEngine, DecisionError
+
+        decision_engine = DecisionEngine(self, self.db)
+        outbox_counts = decision_engine.recover()
         counts = {
             "comments": 0,
             "events": 0,
@@ -363,6 +450,8 @@ class RelayService:
             "retryable": 0,
             "ignored": 0,
             "baselined": 0,
+            "auto_dispatched": 0,
+            "auto_dispatch_waiting": 0,
             "outbox_published": outbox_counts.get("published", 0),
             "outbox_retry": outbox_counts.get("retry", 0),
             "outbox_blocked": outbox_counts.get("blocked", 0),
@@ -377,7 +466,14 @@ class RelayService:
             try:
                 pr = self.github.get_pull_request(self.repo_config.repository, monitor.pr_number)
                 if pr.get("state") != "open":
-                    self._alert("error", "PR_NOT_OPEN", f"Monitored PR #{monitor.pr_number} is {pr.get('state')}", monitor.task_id, monitor.pr_number, 300)
+                    self._alert(
+                        "error",
+                        "PR_NOT_OPEN",
+                        f"Monitored PR #{monitor.pr_number} is {pr.get('state')}",
+                        monitor.task_id,
+                        monitor.pr_number,
+                        300,
+                    )
                     continue
                 comments = self.github.list_issue_comments(self.repo_config.repository, monitor.pr_number)
                 commit_shas: set[str] | None = None
@@ -396,9 +492,70 @@ class RelayService:
                 )
                 self._alert("error", code, detail, monitor.task_id, monitor.pr_number, self.repo_config.error_retry_seconds)
                 continue
-            if self._baseline_monitor(monitor, comments):
+
+            baselined_all = self._baseline_monitor(monitor, comments)
+            if baselined_all:
                 counts["baselined"] += len(comments)
-                continue
+
+            # Mentor-authored executable task documents are the authorization.
+            # When a monitor has no active protocol state, create one deterministic
+            # v2 root event and publish it automatically. The root event retains the
+            # historical SAT2_TASK_AUTHORIZED wire name only for protocol compatibility.
+            state = self.db.task_state(monitor.task_id)
+            if (not state or str(state["state"]) in {"READY", "DORMANT"}) and self.effective_mode() is RelayMode.ACTIVE:
+                try:
+                    self.validate_task_spec_ready(monitor, pr)
+                    self._validate_dependencies(monitor)
+                    self._validate_scope_conflicts(monitor)
+                    if not self.local.allow_github_writes:
+                        counts["auto_dispatch_waiting"] += 1
+                        self._alert(
+                            "warning",
+                            "GITHUB_WRITES_DISABLED",
+                            "Executable task document detected, but github.allow_writes is false; automatic dispatch cannot publish the root control event.",
+                            monitor.task_id,
+                            monitor.pr_number,
+                            60,
+                        )
+                    else:
+                        dispatched = decision_engine.dispatch_document(monitor.task_id)
+                        if dispatched.get("created"):
+                            counts["auto_dispatched"] += 1
+                        # The newly generated root comment must be visible to this
+                        # same poll even on a fresh database that baselined older comments.
+                        comments = self.github.list_issue_comments(self.repo_config.repository, monitor.pr_number)
+                except (TaskSpecInvalid, ValueError) as exc:
+                    counts["auto_dispatch_waiting"] += 1
+                    self._alert(
+                        "warning",
+                        "TASK_DOCUMENT_NOT_READY",
+                        str(exc),
+                        monitor.task_id,
+                        monitor.pr_number,
+                        60,
+                    )
+                except DecisionError as exc:
+                    if exc.code != "TASK_ALREADY_ACTIVE":
+                        counts["auto_dispatch_waiting"] += 1
+                        self._alert(
+                            "warning",
+                            exc.code,
+                            exc.detail,
+                            monitor.task_id,
+                            monitor.pr_number,
+                            60,
+                        )
+                except GitHubError as exc:
+                    counts["retryable"] += 1
+                    self._alert(
+                        "error",
+                        "AUTO_DISPATCH_GITHUB_FAILED",
+                        str(exc),
+                        monitor.task_id,
+                        monitor.pr_number,
+                        60,
+                    )
+
             for comment in comments:
                 comment_id = int(comment["id"])
                 if monitor.start_after_comment_id and comment_id <= monitor.start_after_comment_id:
@@ -417,7 +574,13 @@ class RelayService:
                     counts["ignored"] += 1
                     continue
                 if existing and existing["body_hash"] != body_hash and existing["outcome"] != "retryable_error":
-                    self._alert("error", "PROCESSED_COMMENT_EDITED", f"Previously processed control comment {comment_id} changed.", monitor.task_id, monitor.pr_number)
+                    self._alert(
+                        "error",
+                        "PROCESSED_COMMENT_EDITED",
+                        f"Previously processed control comment {comment_id} changed.",
+                        monitor.task_id,
+                        monitor.pr_number,
+                    )
                     self.db.record_comment(self.repo_config.repository, monitor.pr_number, comment, "edited_after_processing")
                     counts["invalid"] += 1
                     continue
@@ -434,7 +597,13 @@ class RelayService:
                 actor = str((comment.get("user") or {}).get("login") or "")
                 if actor not in self.repo_config.trusted_actors:
                     self.db.record_comment(self.repo_config.repository, monitor.pr_number, comment, "untrusted_actor")
-                    self._alert("error", "UNTRUSTED_ACTOR", f"Control event comment {comment_id} was posted by {actor}", monitor.task_id, monitor.pr_number)
+                    self._alert(
+                        "error",
+                        "UNTRUSTED_ACTOR",
+                        f"Control event comment {comment_id} was posted by {actor}",
+                        monitor.task_id,
+                        monitor.pr_number,
+                    )
                     counts["invalid"] += 1
                     continue
                 outcome = "processed"
@@ -443,12 +612,22 @@ class RelayService:
                     try:
                         commits = self.github.list_pull_request_commits(self.repo_config.repository, monitor.pr_number)
                         commit_shas = {str(row.get("sha") or "") for row in commits}
-                        changed_files = [str(row.get("filename") or "") for row in self.github.list_pull_request_files(self.repo_config.repository, monitor.pr_number)]
+                        changed_files = [
+                            str(row.get("filename") or "")
+                            for row in self.github.list_pull_request_files(self.repo_config.repository, monitor.pr_number)
+                        ]
                     except GitHubError as exc:
                         outcome = "retryable_error"
                         error_detail = str(exc)
                         counts["retryable"] += 1
-                        self._alert("error", "GITHUB_EVENT_VALIDATION_FAILED", f"Comment {comment_id}: {exc}", monitor.task_id, monitor.pr_number, 60)
+                        self._alert(
+                            "error",
+                            "GITHUB_EVENT_VALIDATION_FAILED",
+                            f"Comment {comment_id}: {exc}",
+                            monitor.task_id,
+                            monitor.pr_number,
+                            60,
+                        )
                         self.db.record_comment(self.repo_config.repository, monitor.pr_number, comment, outcome, error_detail)
                         continue
                 for raw in docs:
@@ -468,19 +647,39 @@ class RelayService:
                         outcome = "retryable_error"
                         error_detail = str(exc)
                         counts["retryable"] += 1
-                        self._alert("error", "TASK_SPEC_UNAVAILABLE", f"Comment {comment_id}: {exc}", monitor.task_id, monitor.pr_number, 60)
+                        self._alert(
+                            "error",
+                            "TASK_SPEC_UNAVAILABLE",
+                            f"Comment {comment_id}: {exc}",
+                            monitor.task_id,
+                            monitor.pr_number,
+                            60,
+                        )
                         break
                     except GitHubError as exc:
                         outcome = "retryable_error"
                         error_detail = str(exc)
                         counts["retryable"] += 1
-                        self._alert("error", "GITHUB_EVENT_VALIDATION_FAILED", f"Comment {comment_id}: {exc}", monitor.task_id, monitor.pr_number, 60)
+                        self._alert(
+                            "error",
+                            "GITHUB_EVENT_VALIDATION_FAILED",
+                            f"Comment {comment_id}: {exc}",
+                            monitor.task_id,
+                            monitor.pr_number,
+                            60,
+                        )
                         break
                     except Exception as exc:  # noqa: BLE001
                         outcome = "invalid_event"
                         error_detail = str(exc)
                         counts["invalid"] += 1
-                        self._alert("error", "PROTOCOL_OR_STATE_INVALID", f"Comment {comment_id}: {exc}", monitor.task_id, monitor.pr_number)
+                        self._alert(
+                            "error",
+                            "PROTOCOL_OR_STATE_INVALID",
+                            f"Comment {comment_id}: {exc}",
+                            monitor.task_id,
+                            monitor.pr_number,
+                        )
                         break
                 self.db.record_comment(self.repo_config.repository, monitor.pr_number, comment, outcome, error_detail)
                 if history_replay and outcome == "processed":
@@ -494,7 +693,7 @@ class RelayService:
     def doctor(self, deep: bool = True) -> dict[str, Any]:
         result: dict[str, Any] = {
             "ok": True,
-            "version": "2.2.0",
+            "version": "2.2.2",
             "config": str(self.local.path),
             "database": str(self.local.database_path),
             "loopback_only": self.local.host in {"127.0.0.1", "localhost", "::1"},
@@ -518,8 +717,16 @@ class RelayService:
                 return None
 
         check("database_write", lambda: (self.db.set_meta("doctor_write_test", datetime.now(UTC).isoformat()), "ok")[1])
-        check("github_control_writes", lambda: "enabled" if self.local.allow_github_writes else (_ for _ in ()).throw(ValueError("github.allow_writes is false; automatic Session decisions cannot publish")))
-        check("repository_metadata", lambda: {k: self.github.get_repository(self.local.github_repository).get(k) for k in ("full_name", "private", "default_branch")})
+        check(
+            "github_control_writes",
+            lambda: "enabled"
+            if self.local.allow_github_writes
+            else (_ for _ in ()).throw(ValueError("github.allow_writes is false; automatic document-driven progression cannot publish")),
+        )
+        check(
+            "repository_metadata",
+            lambda: {k: self.github.get_repository(self.local.github_repository).get(k) for k in ("full_name", "private", "default_branch")},
+        )
         config = check("repository_config", self.refresh_config)
         heartbeat = self.db.latest_heartbeat()
         if heartbeat:
@@ -542,7 +749,7 @@ class RelayService:
                 if config and age > config.extension_stale_seconds:
                     raise ValueError(f"extension heartbeat stale by {int(age)} seconds")
                 if extension_version and not extension_version.startswith("2.2"):
-                    raise ValueError(f"extension version {extension_version} is incompatible with daemon 2.2.0")
+                    raise ValueError(f"extension version {extension_version} is incompatible with daemon 2.2.2")
                 if duplicates:
                     raise ValueError(f"duplicate Session bindings: {duplicates}")
                 active_roles = payload.get("active_roles") or []
@@ -616,13 +823,23 @@ class RelayService:
             for monitor in config.monitors:
                 if not monitor.enabled:
                     continue
-                pr = check(f"monitor:{monitor.task_id}:pr", lambda m=monitor: self.github.get_pull_request(config.repository, m.pr_number))
+                pr = check(
+                    f"monitor:{monitor.task_id}:pr",
+                    lambda m=monitor: self.github.get_pull_request(config.repository, m.pr_number),
+                )
                 if pr:
                     def task_detail(m=monitor, p=pr):
-                        resolved = self.load_task_spec(m, p)
-                        return {"path": resolved.path, "ref": resolved.ref, "sha256": resolved.sha256}
+                        resolved = self.validate_task_spec_ready(m, p)
+                        return {
+                            "path": resolved.path,
+                            "ref": resolved.ref,
+                            "sha256": resolved.sha256,
+                            "status": resolved.document.get("status"),
+                            "acceptance_count": len(resolved.document.get("acceptance") or resolved.document.get("acceptance_criteria") or []),
+                            "frozen_contract_sha256": self.db.get_meta(f"task_contract:{m.task_id}:sha256"),
+                        }
 
-                    check(f"monitor:{monitor.task_id}:task_spec", task_detail)
+                    check(f"monitor:{monitor.task_id}:task_contract", task_detail)
                     check(
                         f"monitor:{monitor.task_id}:comments",
                         lambda m=monitor: {"count": len(self.github.list_issue_comments(config.repository, m.pr_number))},
