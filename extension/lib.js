@@ -2,6 +2,7 @@ export const DEFAULTS = {
   daemonUrl: "http://127.0.0.1:8765",
   daemonToken: "",
   autoEnabled: true,
+  notifyOnSessionComplete: true,
   activateTargetTab: false,
   openMissingTabs: true,
   allowDuplicateBindings: false,
@@ -11,6 +12,7 @@ export const DEFAULTS = {
   deliveryHistory: {},
   decisionContexts: {},
   decisionHistory: {},
+  replyNotificationHistory: {},
   lastCycleAt: "",
   lastCycleResult: "",
   lastDaemonHealth: null,
@@ -26,6 +28,7 @@ export async function loadSettings() {
   settings.deliveryHistory = settings.deliveryHistory || {};
   settings.decisionContexts = settings.decisionContexts || {};
   settings.decisionHistory = settings.decisionHistory || {};
+  settings.replyNotificationHistory = settings.replyNotificationHistory || {};
   if (!settings.installationId) {
     settings.installationId = crypto.randomUUID();
     await saveSettings(settings);
