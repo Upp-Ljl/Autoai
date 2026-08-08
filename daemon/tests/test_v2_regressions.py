@@ -57,10 +57,14 @@ def test_retryable_task_spec_404_replays_same_comment(local_config):
     gh = FakeGitHub()
     gh.comments = [gh.comments[0]]
     attempts = {"task": 0}
+    # This regression is specifically about retrying the same historical
+    # control comment. Use dry_run so Relay 2.2.2 document auto-discovery does
+    # not perform an earlier task-spec read and consume the injected 404.
+    config = REPO_CONFIG.replace("mode: active", "mode: dry_run")
 
     def get_content(repository, path, ref):
         if path == ".sat2/relay.yml":
-            return REPO_CONFIG
+            return config
         attempts["task"] += 1
         if attempts["task"] == 1:
             raise GitHubError("GET", "/contents/task", 404, "Not Found", {"ref": ref})
