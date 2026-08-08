@@ -99,7 +99,7 @@ def resolve_target(event: RelayEvent, monitor: RepoMonitor | None) -> str | None
 def transition_name(event: RelayEvent) -> str:
     return {
         EventType.TASK_AUTHORIZED: "DISPATCHED",
-        EventType.WORKER_ACK: "DISPATCHED",  # informational event; work remains dispatched
+        EventType.WORKER_ACK: "DISPATCHED",  # legacy informational event only
         EventType.WORKER_CHECKPOINT: "MENTOR_REVIEW",
         EventType.MENTOR_CHANGES_REQUIRED: "DISPATCHED",
         EventType.MENTOR_ACCEPTED: "COMPLETE",
@@ -111,11 +111,11 @@ def transition_name(event: RelayEvent) -> str:
 
 
 _ALLOWED_PREVIOUS = {
-    EventType.TASK_AUTHORIZED: {None, "READY", "DORMANT", "BLOCKED", "CANCELLED", "COMPLETE", "ACCEPTED"},
+    EventType.TASK_AUTHORIZED: {None, "READY", "DORMANT"},
     EventType.WORKER_ACK: {"DISPATCHED"},
     EventType.WORKER_CHECKPOINT: {"DISPATCHED", "WORKING"},  # WORKING retained for v2.0 migration
     EventType.MENTOR_CHANGES_REQUIRED: {"MENTOR_REVIEW"},
-    EventType.MENTOR_ACCEPTED: {"MENTOR_REVIEW", "HUMAN_GATE"},
+    EventType.MENTOR_ACCEPTED: {"MENTOR_REVIEW"},
     EventType.TASK_BLOCKED: {"DISPATCHED", "WORKING", "MENTOR_REVIEW"},
     EventType.HUMAN_GATE: {None, "DISPATCHED", "WORKING", "MENTOR_REVIEW"},
     EventType.RELAY_ALERT: {None, "DISPATCHED", "WORKING", "MENTOR_REVIEW", "BLOCKED"},
@@ -141,7 +141,10 @@ def _decision_options(event: RelayEvent, target_role: str) -> list[str]:
             return []
         return ["MENTOR_CHANGES_REQUIRED", "MENTOR_ACCEPTED", "TASK_BLOCKED"]
     if event.event_type in {EventType.TASK_AUTHORIZED, EventType.MENTOR_CHANGES_REQUIRED}:
-        return ["WORKER_ACK", "WORKER_CHECKPOINT", "TASK_BLOCKED"]
+        # WORKER_ACK remains parseable for backward compatibility but is not
+        # part of the normal document-driven control path. Delivery confirmation
+        # already proves that the Worker received the Capsule.
+        return ["WORKER_CHECKPOINT", "TASK_BLOCKED"]
     return []
 
 
@@ -161,26 +164,44 @@ Allowed decision values for this Capsule: {", ".join(options)}.
 Do not write Relay YAML, task IDs, PR numbers, SHA values, actor roles, target roles, parent IDs, timestamps, or event IDs. The local Relay generates and validates all control fields."""
 
 
+def _contract_lines(task_spec: dict[str, Any] | None) -> tuple[str, str, str, str]:
+    if not task_spec:
+        return "[]", "[]", "[]", "[]"
+    purpose = task_spec.get("purpose") or task_spec.get("objective") or []
+    acceptance = task_spec.get("acceptance") or task_spec.get("acceptance_criteria") or []
+    required_reading = task_spec.get("required_reading") or task_spec.get("required_documents") or []
+    human_gates = task_spec.get("human_gates") or []
+    return (
+        json.dumps(purpose, ensure_ascii=False),
+        json.dumps(acceptance, ensure_ascii=False),
+        json.dumps(required_reading, ensure_ascii=False),
+        json.dumps(human_gates, ensure_ascii=False),
+    )
+
+
 def build_execution_capsule(
     event: RelayEvent,
     target_role: str,
     marker: str,
     monitor: RepoMonitor | None,
     delivery_token: str = "legacy-delivery-token-0000",
+    task_spec: dict[str, Any] | None = None,
+    task_spec_sha256: str | None = None,
 ) -> str:
     sha = event.candidate_sha or event.reviewed_sha or event.authorized_sha or event.base_sha or "not supplied"
     required_apps = ", ".join(monitor.required_apps if monitor else ["GitHub"])
     source_url = event.source_comment_url or f"GitHub PR #{event.pr_number}"
     task_ref = monitor.task_ref if monitor else "@config"
     action = {
-        EventType.TASK_AUTHORIZED: "Read the task specification, current PR, exact SHA and required documents. Perform only the authorized source work.",
-        EventType.WORKER_ACK: "Worker receipt was recorded. This message is informational for Mentor; no response event is required.",
-        EventType.WORKER_CHECKPOINT: "Read the Worker checkpoint, task specification, exact current PR diff, and complete an independent Mentor review.",
-        EventType.MENTOR_CHANGES_REQUIRED: "Read the Mentor findings, repair only the authorized blockers, and produce a new Worker checkpoint when ready.",
-        EventType.MENTOR_ACCEPTED: "Read the acceptance record. Do not start a dependent task until a separate authorization Capsule arrives.",
+        EventType.TASK_AUTHORIZED: "The Mentor-authored task specification is complete and executable. Read it at the exact task reference, verify the current PR/SHA, then perform the bounded task without waiting for another authorization message.",
+        EventType.WORKER_ACK: "Worker receipt was recorded. This legacy informational message requires no response.",
+        EventType.WORKER_CHECKPOINT: "Read the Worker checkpoint, the frozen task contract, the exact current PR diff, and independently decide whether every acceptance criterion is satisfied.",
+        EventType.MENTOR_CHANGES_REQUIRED: "Read the Mentor findings and the unchanged frozen task contract, repair only the stated blockers, then produce a new Worker checkpoint.",
+        EventType.MENTOR_ACCEPTED: "The Mentor accepted the candidate against the frozen task contract. This task is complete; Relay will discover any dependent executable task document automatically.",
     }.get(event.event_type, "Read the source event and act only within the SAT2 control protocol.")
     summary = event.summary or "No additional summary supplied; the task specification, PR, and exact SHA are authoritative."
     decision_template = _decision_template(event, target_role, delivery_token)
+    purpose, acceptance, required_reading, human_gates = _contract_lines(task_spec)
     return f"""@GitHub
 SAT2 Guided Execution Capsule 2.2
 
@@ -196,6 +217,8 @@ Repository: {event.repository}
 Task: {event.task_id}
 Task specification: {monitor.task_file if monitor else 'not supplied'}
 Task reference: {task_ref}
+Task contract SHA-256: {task_spec_sha256 or event.task_spec_sha256 or 'not supplied'}
+Task status: {str((task_spec or {}).get('status') or 'not supplied')}
 PR: #{event.pr_number}
 Bound SHA: {sha}
 Control head SHA: {event.control_head_sha or 'not supplied'}
@@ -203,6 +226,10 @@ Source: {source_url}
 Required app capability: {required_apps}
 Allowed paths: {json.dumps(monitor.allowed_paths if monitor else [], ensure_ascii=False)}
 Forbidden paths: {json.dumps(monitor.forbidden_paths if monitor else [], ensure_ascii=False)}
+Task purpose/objective: {purpose}
+Acceptance criteria: {acceptance}
+Required reading declared by task: {required_reading}
+Human gates declared by task: {human_gates}
 
 Current instruction:
 {action}
@@ -211,11 +238,13 @@ Event summary:
 {summary}
 
 Mandatory controls:
-1. GitHub current state, the task specification and exact SHA are authoritative; do not rely on chat memory.
-2. Read all required documents named by the task specification before making a scientific or source decision.
-3. Do not merge, mark ready, dispatch workflows, run qualification/formal experiments, change registry/seeds/evidence/paper, force-push, retarget the base, or expand scope without an explicit current human gate.
-4. Session output contains business judgment only. The extension and local Relay own message routing and control-event publication.
-5. The delivery token is scoped to this Capsule, role and conversation. Never reuse a token from another response.
+1. GitHub current state, the frozen task contract and exact SHA are authoritative; do not rely on chat memory.
+2. Read every document required by the task specification before making a scientific/source decision. The acceptance criteria above are a transport snapshot, not a substitute for reading the task file.
+3. A Worker checkpoint means the Worker asserts that the current candidate satisfies every task acceptance criterion that is applicable at this stage. Mentor must independently verify those criteria before accepting.
+4. Do not merge, mark ready, dispatch workflows, run qualification/formal experiments, change registry/seeds/evidence/paper, force-push, retarget the base, or expand scope unless the task document explicitly places that action outside a human gate.
+5. Session output contains business/scientific judgment only. The extension and local Relay own routing, SHA/parent binding and control-event publication.
+6. The delivery token is scoped to this Capsule, role and conversation. Never reuse a token from another response.
+7. If the task contract, PR head, role binding or required evidence is inconsistent, emit TASK_BLOCKED rather than guessing or silently weakening an acceptance criterion.
 
 {decision_template}
 """
