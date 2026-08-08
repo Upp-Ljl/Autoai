@@ -1,254 +1,87 @@
-# SAT2 Chat Relay Protocol 2.2
+# SAT2 Chat Relay Protocol 2.2.2
 
-## 0. 文档地位
+## 0. 核心原则
 
-本文件是 SAT2 Relay 2.2 的当前机器协作协议。它取代任何要求 ChatGPT Session 手写、校验或发布 Relay YAML 控制事件的旧规则。
+Relay 2.2.2 的正常协作是 **Mentor 文档驱动**，不是重复审批驱动。
 
-科学治理、任务范围、精确 SHA、证据状态和人工高风险门仍由 SAT2 仓库中的协作协议、任务 YAML、PR 和 GitHub 事实决定。Relay 只传递、校验和确定性发布协作决定，不替代 Mentor 或 Worker 的科研判断。
+```text
+Mentor 在任务开始前写完整 task 文档
+→ task 文档给出目标、范围、角色、依赖、验收标准和 human gates
+→ Relay 校验文档是否可执行
+→ Relay 自动投递 Worker
+→ Worker 按文档工作并回传 checkpoint
+→ Relay 自动投递 Mentor
+→ Mentor 按同一份冻结任务合同验收
+→ CHANGES_REQUIRED 回 Worker，或 ACCEPTED 结束任务
+→ 依赖满足后自动发现下一份可执行任务文档
+```
+
+有效且完整的 Mentor task 文档本身就是正常任务授权。用户不需要再点击“授权任务”，`MENTOR_ACCEPTED` 也不需要机械二次确认。只有 task 文档明确列出的 `human_gates`、无法机器判定的冲突/缺失、或 `TASK_BLOCKED` 才停下来找用户。
+
+Relay 不替代科研判断；它负责消息传递、角色与会话绑定、状态、SHA、parent、路由、去重、GitHub 控制评论和恢复。
 
 当前实现状态：
 
 ```text
-Relay 2.2 code and local installation: IMPLEMENTED
-Decision JSON / deterministic publishing path: IMPLEMENTED
-extension one-click Windows bootstrap (2.2.1): IMPLEMENTED IN SOURCE / FIELD ACCEPTANCE PENDING
-real Session closed-loop acceptance: PENDING FIELD ACCEPTANCE
+Mentor document contract validation: IMPLEMENTED IN SOURCE
+automatic document dispatch: IMPLEMENTED IN SOURCE
+automatic Mentor Accepted publication: IMPLEMENTED IN SOURCE
+bidirectional Worker ↔ Mentor relay: IMPLEMENTED IN SOURCE
+bound Session reply notification: IMPLEMENTED IN SOURCE
+real Windows/ChatGPT closed-loop acceptance: PENDING FIELD ACCEPTANCE
 long-term unattended stability: NOT YET CLAIMED
 ```
 
-在完成一次真实的 `extension one-click start → Decision JSON → GitHub control comment → next Session Capsule` 闭环前，只能称为“已实现、待现场验收”，不得称为长期稳定验证完成。
+## 1. 权威事实
 
-## 1. 权威事实顺序
-
-对活动任务，事实优先级固定为：
+优先级固定为：
 
 ```text
-1. 当前 GitHub PR、base/head SHA、评论与 review
-2. 当前任务 YAML 及其 task_ref
-3. 当前 Relay Capsule 与源事件
+1. 当前 GitHub PR / exact base+head SHA / comments
+2. 当前 Mentor task YAML 及其 task_ref
+3. 当前 Relay Capsule / parent event
 4. 当前 checkpoint / handoff
-5. SAT2 总协作协议和科学方向文档
-6. 历史设计文档中的状态描述
+5. 长期协作和科学方向文档
+6. 历史聊天和历史状态描述
 ```
 
-SQLite、扩展存储和聊天记忆只用于恢复、去重和路由，不替代 GitHub 事实。
+SQLite 和扩展存储只用于传输、恢复、去重和路由，不替代 GitHub。
 
-## 2. 组件职责
+## 2. Mentor task 文档合同
+
+任务在自动投递前至少必须满足：
 
 ```text
-Session:
-  读取 Capsule 指定文档和 PR
-  完成科研分析、源码工作或审查
-  输出简短 Decision JSON
-
-Browser Extension:
-  绑定 role ↔ concrete /c/<conversation-id>
-  heartbeat
-  Capsule 注入与确认
-  检测或手动提交当前 Decision
-  通过受限 Native Messaging host 一键启动本地 Relay
-
-Native Bootstrap Host:
-  仅接受 status / ensure_running
-  仅调用固定 START_OR_REPAIR.ps1 -SkipPoll
-  不读取 GitHub PAT
-  不接受任意命令、脚本路径或 shell 参数
-  每次请求后退出，不常驻
-
-Local Relay:
-  GitHub 轮询
-  Guidance Capsule 生成
-  状态、角色、SHA、parent 和路径校验
-  控制事件确定性生成
-  GitHub 评论发布
-  outbox 恢复、去重、双向路由和诊断
-
-GitHub:
-  保存任务、PR、精确 SHA 和正式控制事件
-```
-
-扩展不得保存 GitHub PAT；Native host 不得接触 GitHub PAT；Session 不得计算控制字段；Relay 不得作科研判断。
-
-## 3. 按需运行与一键启动
-
-Windows 登录时：
-
-```text
-Relay daemon: NOT STARTED
-supervisor: NOT STARTED
-port 8765: CLOSED
-login scheduled task: NONE
-```
-
-Native Messaging host 不是后台服务。安装时只落盘一个受限可执行文件并注册到当前 Windows 用户的 Chrome/Edge Native Messaging host 配置；浏览器请求时临时启动，请求完成即退出。
-
-首次加载或更换 unpacked extension ID 后，需要一次本地配对：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File "$env:LOCALAPPDATA\SAT2Relay\on-demand\REGISTER_NATIVE_HOST.ps1" `
-  -ExtensionId <当前扩展 ID>
-```
-
-配对完成后的日常首选路径：
-
-```text
-打开 SAT2 Relay 扩展
-→ 点击“一键启动协作”
-→ 若 daemon 离线，Native host 执行 ensure_running
-→ 等待 127.0.0.1:8765 health
-→ 自动推进开关置为 ON
-→ 执行首轮 heartbeat / poll / delivery cycle
-```
-
-桌面 `SAT2 Relay - Start or Repair` 继续作为故障后备。停止入口应使 Relay 后台进程和 8765 监听归零。
-
-## 4. Guidance Capsule
-
-每条需要 Session 处理的 Capsule 至少包含：
-
-```text
-delivery_id
-delivery_token
-target_role
 task_id
-repository
-PR number
-exact bound SHA
-parent/source event
-source comment
-required reading
-task file path/ref
-allowed paths
-forbidden paths
-human gates
-one current action
-expected Decision type
+non-empty title
+explicit executable status
+repository / PR / worker_role binding
+purpose 或 objective
+non-empty acceptance / acceptance_criteria
+explicit allowed_paths
+explicit forbidden_paths（可为空列表，但字段必须存在）
+explicit human_gates（可为空列表，但字段必须存在）
+base/branch 约束（文档提供时必须与当前 PR 一致）
 ```
 
-`delivery_token` 是本次 Session 回答与当前 Capsule 的因果绑定。它不是 GitHub token，也不是本地 API token。
+Mentor 应在任务开始前把 `required_reading`、依赖关系、forbidden claims、阶段边界和验收判据写清楚。验收标准不得使用“基本完成”“差不多”“看起来可用”等不可判定措辞。
 
-目标 Session 未绑定、标签页关闭、浏览器休眠或 heartbeat 过期时，delivery 进入：
+Relay 第一次自动 dispatch 时计算并冻结：
 
 ```text
-WAITING_FOR_ENDPOINT
+task_contract_sha256 = SHA256(exact task document text)
 ```
 
-这不是 Protocol State，也不视为永久失败，不应消耗正常投递尝试次数。Endpoint 恢复后继续投递。
-
-## 5. Session 输出合同
-
-收到 Capsule 的 Session 可以先输出正常的人类可读科研报告，但末尾必须包含且只包含一个当前 Decision：
-
-````markdown
-<!-- SAT2_RELAY_DECISION -->
-```json
-{
-  "delivery_token": "从当前 Capsule 原样复制",
-  "decision": "WORKER_CHECKPOINT",
-  "summary": "已完成当前范围内的源码修复，等待 Mentor 审查。"
-}
-```
-````
-
-Session 允许填写：
+后续 Worker checkpoint、Mentor changes-required、Mentor accepted 都必须仍对应同一 task-contract hash。执行过程中静默修改目标或验收标准时：
 
 ```text
-delivery_token
-decision
-summary
+TASK_SPEC_CHANGED_DURING_EXECUTION
+→ fail closed
 ```
 
-当前支持的 `decision`：
+应创建新的任务/明确 rebaseline，而不是让旧 Session 按漂移标准继续。
 
-```text
-WORKER_ACK
-WORKER_CHECKPOINT
-MENTOR_CHANGES_REQUIRED
-MENTOR_ACCEPTED
-TASK_BLOCKED
-```
-
-Session 禁止填写或覆盖：
-
-```text
-protocol
-event_id
-event_type
-repository
-task_id
-pr_number
-actor_role
-target_role
-parent_event_id
-correlation_id
-base_sha
-candidate_sha
-reviewed_sha
-control_head_sha
-attempt
-timestamp
-YAML event block
-```
-
-普通自然语言、旧 Capsule 的 token、其他角色或其他会话中的 JSON 都不能推进任务。
-
-## 6. 自动检测与手动后备
-
-扩展提供两条等价路径：
-
-```text
-自动路径：
-最新 assistant message 完成生成
-→ 检测 SAT2_RELAY_DECISION
-→ 提交 localhost Relay
-
-手动后备：
-用户点击“提交当前 Decision”
-→ 读取当前 assistant message
-→ 走同一校验、去重和发布路径
-```
-
-DOM 变化、流式输出或后台标签页导致自动检测失败时，手动按钮不得要求用户复制 JSON、YAML、SHA 或 parent event。
-
-## 7. 三类状态严格分离
-
-### 7.1 Protocol State
-
-```text
-DISPATCHED
-MENTOR_REVIEW
-COMPLETE
-BLOCKED
-```
-
-### 7.2 Control Event
-
-```text
-SAT2_TASK_AUTHORIZED
-SAT2_WORKER_ACK
-SAT2_WORKER_CHECKPOINT
-SAT2_MENTOR_CHANGES_REQUIRED
-SAT2_MENTOR_ACCEPTED
-SAT2_TASK_BLOCKED
-```
-
-### 7.3 Delivery / Publish State
-
-```text
-QUEUED
-WAITING_FOR_ENDPOINT
-LEASED
-CONFIRMED
-WAITING_FOR_HUMAN
-PUBLISH_UNCERTAIN
-PUBLISHED
-RETRYABLE_ERROR
-```
-
-Delivery 或 Publish 状态不得被写成任务 Protocol State。
-
-## 8. 最小状态转换
+## 3. 正常 Protocol State
 
 ```text
 DISPATCHED
@@ -264,213 +97,235 @@ MENTOR_REVIEW
 COMPLETE
 ```
 
-`SAT2_WORKER_ACK` 是信息事件，不改变 Protocol State，也不阻塞 Worker 开始当前授权范围内的工作。
+`SAT2_WORKER_ACK` 只保留兼容性，不是正常路径的阻塞步骤。Capsule 已在会话 transcript 中确认，即代表传输层收到。
 
-`SAT2_TASK_BLOCKED` 将任务置于 `BLOCKED`，等待明确的人类恢复或新授权；Relay 不自行扩展任务范围。
+`WAITING_FOR_ENDPOINT` 是 delivery 状态，`PUBLISH_UNCERTAIN` 是 publish 状态，都不能冒充任务 Protocol State。
 
-非法转换必须在本地发布前拒绝，不能先污染 GitHub 再事后报警。
+## 4. 文档自动 dispatch
 
-## 9. 固定路由
-
-路由由事件类型和任务配置计算，不能由 Session 自报：
+Relay 每轮 poll 检查 enabled monitor。某任务尚无活动 Protocol State 时，只有同时满足以下条件才允许自动启动：
 
 ```text
-SAT2_TASK_AUTHORIZED          → task.worker_role
-SAT2_WORKER_ACK               → mentor
-SAT2_WORKER_CHECKPOINT        → mentor
-SAT2_MENTOR_CHANGES_REQUIRED  → task.worker_role
-SAT2_MENTOR_ACCEPTED          → task.worker_role
-SAT2_TASK_BLOCKED             → mentor
+Mentor task 文档存在且 YAML 可解析
+Task/PR/role/paths 与 monitor 一致
+status 可执行
+purpose/objective 非空
+acceptance criteria 非空
+PR open
+base/branch 约束一致
+dependencies 满足
+无 active write-scope conflict
+github.allow_writes = true
 ```
 
-一个 concrete conversation 默认只能绑定一个角色；一个角色默认只能存在一个 active endpoint。冲突必须由 Deep Doctor 明确报告。
+Relay 为 v2 兼容仍在 GitHub 线上生成一次 `SAT2_TASK_AUTHORIZED` 根事件，但它的语义是 **deterministic document-dispatch root**，不是额外的人类授权门。Session 和用户不手写此事件。
 
-## 10. Relay 确定性生成控制事件
+## 5. Guidance Capsule
 
-Relay 接收合法 Decision 后，从本地账本和 GitHub 重新读取：
+需要 Session 处理的 Capsule 至少携带：
 
 ```text
-current endpoint role
-current task and PR
-current PR head
-last accepted event / parent_event_id
-correlation_id
-worker role
-current state
-attempt
-timestamp
+delivery token
+role / task / PR
+exact bound SHA / current control head
+parent event / source
+exact task file + ref
+task-contract SHA-256
+purpose/objective snapshot
+acceptance criteria snapshot
+required reading snapshot
+allowed / forbidden paths
+human gates
+当前唯一动作
+合法 Decision 集合
 ```
 
-然后生成 schema-valid YAML 评论。Session 不参与控制字段生成。
+Capsule 中的验收标准快照用于防错，不能代替 Session 读取完整 task 文档。
 
-首次 `SAT2_TASK_AUTHORIZED` 也应由 Dashboard 的“授权任务”操作生成。用户只确认任务，Relay 自动读取 task、PR、base/head、worker role、allowed/forbidden paths 和 human gates；用户不手写授权 YAML。
+## 6. Session 输出合同
 
-## 11. 发布前闸门
-
-每次发布前至少校验：
+正常 Worker 只需要：
 
 ```text
-1. Decision JSON 可解析且只有允许字段
-2. delivery_token 对应当前未完成 delivery
-3. conversation 与 endpoint role 匹配
-4. decision 与 actor role 匹配
-5. 当前 Protocol State 允许该 decision
-6. parent_event_id 等于本地账本 last_event_id
-7. PR 仍 open，task/PR/base 未漂移
-8. 发布前重新读取当前 PR head
-9. Worker checkpoint candidate/control SHA 等于当前 head
-10. Mentor review 的 reviewed SHA 等于被投递 checkpoint SHA
-11. target role 等于固定路由
-12. 同一 Decision 不存在 pending 或已发布 outbox
-13. allowed/forbidden paths 与 task spec 一致
+SAT2_RELAY_DECISION
+{"delivery_token":"...","decision":"WORKER_CHECKPOINT","summary":"..."}
 ```
 
-Mentor 审查期间 PR head 改变时，必须返回：
+Mentor 只需要：
 
 ```text
-STALE_PR_HEAD
+SAT2_RELAY_DECISION
+{"delivery_token":"...","decision":"MENTOR_CHANGES_REQUIRED","summary":"..."}
 ```
 
-并拒绝自动发布，要求 Mentor 重新读取最新 diff；不得把旧 head 的审查结论绑定到新 head。
-
-## 12. 幂等、Outbox 与发布恢复
-
-最小去重键必须绑定：
+或：
 
 ```text
-task_id
-+ delivery_id
-+ assistant_message_hash
-+ decision
-+ current_head
+SAT2_RELAY_DECISION
+{"delivery_token":"...","decision":"MENTOR_ACCEPTED","summary":"..."}
 ```
 
-稳定 event marker 至少由以下字段确定：
+Session 不得填写或覆盖 task、PR、SHA、parent、actor、target、correlation、event ID、timestamp 或 Relay YAML。
+
+Worker checkpoint 的语义是：Worker 声明当前 candidate 已满足 task 文档中本阶段适用的全部 acceptance criteria。Mentor 必须独立重新读取 task 文档、当前 PR diff 和 exact head 后逐项验收；不能只相信 Worker summary。
+
+不满足、证据不足或文档/PR 不一致时应 `TASK_BLOCKED`，不得猜测或降低标准。
+
+## 7. Mentor → Worker 传递保障
+
+固定链路：
+
+```text
+Mentor task/changes decision
+→ Relay 生成唯一 GitHub control event
+→ GitHub poller 接受并更新本地 ledger
+→ resolve_target(event) 固定计算 task.worker_role
+→ 生成带随机 delivery_token 的 Worker Capsule
+→ delivery 只能由绑定该 worker_role 的 fresh endpoint lease
+→ extension 注入具体 /c/<conversation-id>
+→ content script 必须在 transcript 中看到精确 Relay delivery marker
+→ 才向 daemon 回报 DELIVERED
+```
+
+没有 Worker endpoint 时消息等待，不改科学状态、不跨角色投递。
+
+## 8. Worker → Mentor 回传保障
+
+固定链路：
+
+```text
+Worker 完成回复
+→ Decision JSON 回传当前 delivery_token
+→ extension 只在绑定 Worker conversation 中提取
+→ 提交 installation/role/conversation/delivery/message hash
+→ daemon 校验 endpoint、token、delivery、role、Protocol State
+→ 发布前重新读取 PR current head
+→ candidate_sha/control_head_sha 自动绑定 current head
+→ 生成稳定 event marker + outbox
+→ GitHub 发布
+→ poller 接受 checkpoint
+→ target 固定解析为 mentor
+→ Mentor Capsule 只能由绑定 mentor endpoint lease
+→ 注入 Mentor conversation 并确认 transcript marker
+```
+
+因此 Worker 不能自行把消息“发给另一个角色”，Mentor 也不能靠手写 target 改路由。
+
+## 9. 因果绑定、去重与恢复
+
+Decision 必须同时绑定：
 
 ```text
 delivery_id
-+ assistant_message_hash
-+ decision
+delivery_token
+role
+conversation_key
+assistant_message_id
+assistant_message_hash
+current Protocol State
+current PR head
 ```
 
-同一 assistant message 被重复扫描、重复点击或 daemon 重启后，只能发布一条 GitHub 控制评论。
+同一：
 
-GitHub POST 超时或返回不确定时：
+```text
+task_id + delivery_id + assistant_message_hash + decision + current_head
+```
+
+只允许生成一个 outbox/event marker。
+
+GitHub POST 不确定时：
 
 ```text
 PUBLISH_UNCERTAIN
-→ 先按稳定 event marker 搜索 PR 全部评论
-→ 已存在：绑定已有 comment_id，标记 PUBLISHED
-→ 不存在：重试同一事件，不生成新 marker
+→ 先按 stable marker 搜索 PR comments
+→ 已存在则恢复 PUBLISHED
+→ 不存在才重试原事件
 ```
 
-Daemon 重启后必须恢复 pending outbox、pending delivery 和 publish-uncertain 状态，不要求 Session 重发 Decision。
+Daemon 重启恢复 pending outbox/delivery；endpoint 临时离线保持等待。
 
-## 13. 自动发布与人工门
+## 10. STALE_PR_HEAD
 
-Relay 2.2 可以在本地 `github.allow_writes=true` 且发布闸门通过后自动发布低风险控制评论：
+Worker checkpoint 发布前：
 
 ```text
-SAT2_WORKER_ACK
-SAT2_WORKER_CHECKPOINT
-SAT2_MENTOR_CHANGES_REQUIRED
-SAT2_TASK_BLOCKED
+candidate_sha == control_head_sha == freshly-read PR head
 ```
 
-以下仍需用户确认：
+Mentor review 发布前：
 
 ```text
-首次 SAT2_TASK_AUTHORIZED
-SAT2_MENTOR_ACCEPTED（默认一次本地确认）
-任务范围或基线变化
+reviewed_sha == checkpoint candidate_sha == freshly-read PR head
 ```
 
-Relay 永远不得自动执行或授权：
+Mentor 审查期间 head 改变时返回 `STALE_PR_HEAD`，旧审查结论不得绑定新 head。
+
+## 11. Human gates
+
+任务文档中的 `human_gates` 才是暂停依据。Relay 永远不能因为“自动推进”而绕过：
 
 ```text
 merge / mark ready
-base branch change / force push
 workflow dispatch
-qualification
-formal experiment
-registry or seed change
-accepted-evidence change
-paper claim or number change
+qualification / formal experiment
+registry / seed / accepted evidence change
+paper claim / paper number change
+force push / base change / scope expansion
 ```
 
-控制评论自动发布不等于自动执行上述高风险动作。
+如果 Mentor task 文档没有授权这些动作，Session 不能执行。
 
-## 14. 诊断要求
+## 12. 绑定 Session 回复完成提醒
 
-Dashboard/Deep Doctor 至少显示：
+扩展提供独立开关：
 
 ```text
-Relay health and version
-last poll and last poll error
-task Protocol State
-current PR head
-last_event_id
-expected next actor / decision
-role endpoints and heartbeat
-pending deliveries
-pending outbox
-last stable error code
-recommended recovery action
+绑定 Session 回复完成提醒
 ```
 
-稳定错误码至少包括：
+它与 `自动推进` 解耦。即使 Relay daemon 停止或自动推进关闭，只要具体 ChatGPT conversation 已绑定且扩展运行：
 
 ```text
-ENDPOINT_NOT_BOUND
-ENDPOINT_STALE
-ROLE_BINDING_CONFLICT
-NO_ACTIVE_DELIVERY
-DELIVERY_TOKEN_MISMATCH
-DECISION_SCHEMA_INVALID
-ROLE_DECISION_MISMATCH
-ILLEGAL_STATE_TRANSITION
-PARENT_EVENT_MISMATCH
-STALE_PR_HEAD
-TASK_FILE_INVALID
-GITHUB_PERMISSION_DENIED
-GITHUB_PUBLISH_UNCERTAIN
-NATIVE_HOST_UNAVAILABLE
-START_SCRIPT_FAILED
-START_TIMEOUT
+assistant 开始/持续生成
+→ watcher 等待生成停止且文本稳定
+→ 独立 extension Port 上报完成
+→ background 校验该 conversation 确实绑定某个 role
+→ 去重
+→ Chrome/Edge 弹出“SAT2 <role> 回复完成”通知
 ```
 
-错误信息必须指出故障层、原因和恢复动作，不能只显示 HTTP 500。
+点击通知返回对应 Session。未绑定会话不提醒；历史页面首次加载不会对既有旧回答补发通知；同一回复只提醒一次。该功能不产生 Relay Control Event，也不改变 Protocol State。
 
-## 15. 现场验收
+## 13. 现场验收标准
 
-启用真实自动推进前，必须至少完成一次：
+正式宣称闭环可靠前至少现场跑通：
 
 ```text
-daemon 完全停止
-→ 扩展点击“一键启动协作”
-→ Relay 从 Native host 启动并完成首轮 cycle
-→ Dashboard 人工授权
-→ Worker Session 收到 Capsule
-→ Worker 输出带 delivery_token 的 Decision JSON
-→ Relay 自动发布唯一 checkpoint 评论
-→ Mentor Session 自动收到 review Capsule
-→ Mentor 输出 changes-required 或 accepted Decision
-→ Relay 自动发布并路由下一角色
+Relay 完全停止
+→ 插件一键启动协作
+→ 自动发现完整 Mentor task 文档
+→ Worker 收到 Capsule 并 transcript-confirmed
+→ Worker checkpoint 自动发布
+→ Mentor 收到 review Capsule 并 transcript-confirmed
+→ Mentor changes-required 自动回 Worker
+→ 第二轮 checkpoint 自动回 Mentor
+→ Mentor accepted 自动 COMPLETE
+→ 若有 dependency-satisfied 下一任务，则自动 dispatch
 ```
 
-验收目标：
+同时验证：
 
 ```text
-0 手写 Relay YAML
-0 手工复制 SHA
-0 手工填写 parent_event_id
-0 手工转发 Session 内容
-0 重复 GitHub 控制评论
-0 跨角色投递
-Session 暂时离线后可恢复
-daemon 重启后可恢复
-自动检测失败时可按钮提交
-插件可从 daemon 完全停止状态一键启动协作
+0 手写 YAML / SHA / parent / target
+0 跨角色 delivery
+0 重复 GitHub control comment
+错误 token/错误 conversation 被拒绝
+endpoint 离线可恢复
+daemon 重启可恢复
+STALE_PR_HEAD fail closed
+task contract 中途变化 fail closed
+自动推进关闭时绑定 Session 回复提醒仍工作
 ```
 
-完成现场闭环后可记录“真实闭环验收通过”；在此之前不得宣称长期稳定无人值守运行已经验证。
+在这条真实 Windows + ChatGPT 闭环完成前，状态只能写：`IMPLEMENTED IN SOURCE / PENDING FIELD ACCEPTANCE`。
