@@ -18,7 +18,7 @@
     "http://localhost/*"
   ],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "service_worker.js",
     "type": "module"
   },
   "action": {
@@ -38,7 +38,8 @@
         "https://chatgpt.com/*"
       ],
       "js": [
-        "content.js"
+        "content.js",
+        "reply_watcher.js"
       ],
       "run_at": "document_idle"
     }
