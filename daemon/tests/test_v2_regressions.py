@@ -9,7 +9,7 @@ from sat2_relay.github import GitHubError
 from sat2_relay.models import RepoMonitor
 from sat2_relay.protocol import validate_event_document
 from sat2_relay.service import RelayService
-from test_service import AUTH_BODY, EVENT_BODY, FakeGitHub, REPO_CONFIG
+from test_service import AUTH_BODY, EVENT_BODY, FakeGitHub, REPO_CONFIG, TASK_SPEC
 
 
 def test_task_spec_defaults_to_repository_config_ref(local_config):
@@ -26,18 +26,25 @@ def test_task_spec_defaults_to_repository_config_ref(local_config):
     service = RelayService(local_config, db, gh)
     service.poll_once()
     task_reads = [ref for path, ref in refs if path == ".sat2/tasks/WP-B3.yml"]
-    assert task_reads == ["test-ref"]
+    # Relay 2.2.2 deliberately revalidates the frozen task contract on later
+    # control events. The invariant is therefore the authoritative ref, not a
+    # historical assumption that the file is read exactly once.
+    assert task_reads
+    assert set(task_reads) == {"test-ref"}
 
 
 def test_task_spec_pr_head_is_explicit_opt_in(local_config):
     db = RelayDB(local_config.database_path)
     gh = FakeGitHub()
-    config = REPO_CONFIG.replace("task_file: .sat2/tasks/WP-B3.yml", "task_file: .sat2/tasks/WP-B3.yml\n    task_ref: '@pr-head'")
+    config = REPO_CONFIG.replace(
+        "task_file: .sat2/tasks/WP-B3.yml",
+        "task_file: .sat2/tasks/WP-B3.yml\n    task_ref: '@pr-head'",
+    )
     refs = []
 
     def get_content(repository, path, ref):
         refs.append((path, ref))
-        return config if path == ".sat2/relay.yml" else "task_id: WP-B3\n"
+        return config if path == ".sat2/relay.yml" else TASK_SPEC
 
     gh.get_content_text = get_content
     service = RelayService(local_config, db, gh)
@@ -57,7 +64,7 @@ def test_retryable_task_spec_404_replays_same_comment(local_config):
         attempts["task"] += 1
         if attempts["task"] == 1:
             raise GitHubError("GET", "/contents/task", 404, "Not Found", {"ref": ref})
-        return "task_id: WP-B3\n"
+        return TASK_SPEC
 
     gh.get_content_text = get_content
     service = RelayService(local_config, db, gh)
@@ -72,6 +79,7 @@ def test_retryable_task_spec_404_replays_same_comment(local_config):
     assert second["deliveries"] == 1
     row = db.comment_status("Upp-Ljl/sat2", 32, 99)
     assert row["outcome"] == "processed"
+    assert db.get_meta("task_contract:WP-B3:sha256")
 
 
 def test_v2_ack_requires_parent_event_id():
@@ -136,19 +144,27 @@ def test_first_poll_respects_explicit_start_boundary(local_config):
         "task_file: .sat2/tasks/WP-B3.yml",
         "start_after_comment_id: 98\n    task_file: .sat2/tasks/WP-B3.yml",
     )
-    gh.get_content_text = lambda repository, path, ref: config if path == ".sat2/relay.yml" else "task_id: WP-B3\n"
+    gh.get_content_text = lambda repository, path, ref: config if path == ".sat2/relay.yml" else TASK_SPEC
     service = RelayService(local_config, db, gh)
     result = service.poll_once()
     assert result["events"] == 2
     assert result["deliveries"] == 2
+    assert db.get_meta("task_contract:WP-B3:sha256")
 
 
-def test_complete_v2_authorize_ack_checkpoint_accept_chain(local_config):
+def test_complete_v2_wire_chain_keeps_ack_compatible_but_not_required(local_config):
+    """Legacy v2 ACK remains parseable, while 2.2.2 no longer requires it.
+
+    This test exercises wire compatibility only. The normal no-ACK checkpoint
+    path is covered in test_decisions_v22.py.
+    """
     db = RelayDB(local_config.database_path)
     gh = FakeGitHub()
     config = REPO_CONFIG.replace("protocol_version: sat2-relay/v1", "protocol_version: sat2-relay/v2")
-    gh.get_content_text = lambda repository, path, ref: config if path == ".sat2/relay.yml" else "task_id: WP-B3\n"
-    auth = AUTH_BODY.replace("SAT2_RELAY_EVENT_V1", "SAT2_RELAY_EVENT_V2").replace("protocol: sat2-relay/v1", "protocol: sat2-relay/v2")
+    gh.get_content_text = lambda repository, path, ref: config if path == ".sat2/relay.yml" else TASK_SPEC
+    auth = AUTH_BODY.replace("SAT2_RELAY_EVENT_V1", "SAT2_RELAY_EVENT_V2").replace(
+        "protocol: sat2-relay/v1", "protocol: sat2-relay/v2"
+    )
     gh.comments = [dict(gh.comments[0], body=auth)]
     service = RelayService(local_config, db, gh)
 
@@ -176,7 +192,14 @@ timestamp: 2026-08-04T00:01:00+08:00
 summary: received
 ```
 """
-    gh.comments.append({"id": 101, "body": ack_body, "created_at": "2026-08-03T16:01:00Z", "updated_at": "2026-08-03T16:01:00Z", "html_url": "https://example/101", "user": {"login": "Upp-Ljl"}})
+    gh.comments.append({
+        "id": 101,
+        "body": ack_body,
+        "created_at": "2026-08-03T16:01:00Z",
+        "updated_at": "2026-08-03T16:01:00Z",
+        "html_url": "https://example/101",
+        "user": {"login": "Upp-Ljl"},
+    })
     second = service.poll_once()
     assert second["events"] == 1
     assert db.task_state("WP-B3")["state"] == "DISPATCHED"
@@ -199,7 +222,14 @@ timestamp: 2026-08-04T00:02:00+08:00
 summary: source checkpoint
 ```
 """
-    gh.comments.append({"id": 102, "body": checkpoint_body, "created_at": "2026-08-03T16:02:00Z", "updated_at": "2026-08-03T16:02:00Z", "html_url": "https://example/102", "user": {"login": "Upp-Ljl"}})
+    gh.comments.append({
+        "id": 102,
+        "body": checkpoint_body,
+        "created_at": "2026-08-03T16:02:00Z",
+        "updated_at": "2026-08-03T16:02:00Z",
+        "html_url": "https://example/102",
+        "user": {"login": "Upp-Ljl"},
+    })
     third = service.poll_once()
     assert third["events"] == 1 and third["deliveries"] == 1
     assert db.task_state("WP-B3")["state"] == "MENTOR_REVIEW"
@@ -225,7 +255,14 @@ timestamp: 2026-08-04T00:03:00+08:00
 summary: accepted
 ```
 """
-    gh.comments.append({"id": 103, "body": accepted_body, "created_at": "2026-08-03T16:03:00Z", "updated_at": "2026-08-03T16:03:00Z", "html_url": "https://example/103", "user": {"login": "Upp-Ljl"}})
+    gh.comments.append({
+        "id": 103,
+        "body": accepted_body,
+        "created_at": "2026-08-03T16:03:00Z",
+        "updated_at": "2026-08-03T16:03:00Z",
+        "html_url": "https://example/103",
+        "user": {"login": "Upp-Ljl"},
+    })
     fourth = service.poll_once()
     assert fourth["events"] == 1
     assert db.task_state("WP-B3")["state"] == "COMPLETE"
