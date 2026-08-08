@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SAT2 Relay Bridge 2.2",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Guided multi-session automatic progression for SAT2 ChatGPT sessions and the local SAT2 Relay.",
   "minimum_chrome_version": "120",
   "permissions": [
