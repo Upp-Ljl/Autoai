@@ -20,7 +20,7 @@ def test_api_auth_and_heartbeat(local_config):
         response = client.get("/api/v1/health", headers=headers)
         assert response.status_code == 200
         heartbeat = client.post("/api/v1/extension/heartbeat", headers=headers, json={
-            "installation_id": "install-12345678", "extension_version": "1.0.0", "auto_enabled": True,
+            "installation_id": "install-12345678", "extension_version": "2.2.2", "auto_enabled": True,
             "bindings": {"mentor": "https://chatgpt.com/c/test"}, "active_roles": ["mentor"], "browser": "test"
         })
         assert heartbeat.status_code == 200
@@ -72,7 +72,7 @@ def test_delivery_endpoint_leases_only_roles_bound_to_requesting_installation(lo
     with TestClient(app) as client:
         worker_hb = {
             "installation_id": "worker-install-123",
-            "extension_version": "2.0.1",
+            "extension_version": "2.2.2",
             "auto_enabled": True,
             "bindings": {"S3": {"url": "https://chatgpt.com/c/s3", "conversation_key": "c:s3"}},
             "active_roles": ["S3"],
@@ -85,7 +85,7 @@ def test_delivery_endpoint_leases_only_roles_bound_to_requesting_installation(lo
 
         mentor_hb = {
             "installation_id": "mentor-install-123",
-            "extension_version": "2.0.1",
+            "extension_version": "2.2.2",
             "auto_enabled": True,
             "bindings": {"mentor": {"url": "https://chatgpt.com/c/mentor", "conversation_key": "c:mentor"}},
             "active_roles": ["mentor"],
