@@ -2,6 +2,7 @@ import {canonicalChatUrl, loadSettings, parseConversationKey, pruneHistory, save
 
 const NOTIFICATION_ICON = chrome.runtime.getURL("icon128.png");
 const PREFIX = "sat2-session-reply:";
+const PORT_NAME = "SAT2_SESSION_REPLY_COMPLETE";
 
 async function sha256Hex(text) {
   const bytes = new TextEncoder().encode(String(text || ""));
@@ -57,18 +58,18 @@ async function handleReplyComplete(message, sender) {
   return {ok: true, notified: true, role: bound.role, conversationKey};
 }
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== "SAT2_SESSION_REPLY_COMPLETE") return false;
-  handleReplyComplete(message, sender)
-    .then(sendResponse)
-    .catch((error) => sendResponse({ok: false, error: error?.message || String(error)}));
-  return true;
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== PORT_NAME) return;
+  const sender = port.sender;
+  port.onMessage.addListener((message) => {
+    handleReplyComplete(message, sender).catch(() => {});
+  });
 });
 
 chrome.notifications.onClicked.addListener(async (notificationId) => {
   if (!notificationId.startsWith(PREFIX)) return;
   const tail = notificationId.slice(PREFIX.length);
-  const tabId = Number(tail.split(":", 1)[0]);
+  const tabId = Number(tail.split(":")[0]);
   if (!Number.isInteger(tabId)) return;
   try {
     const tab = await chrome.tabs.get(tabId);
