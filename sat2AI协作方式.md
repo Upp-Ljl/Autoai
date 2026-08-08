@@ -2,15 +2,17 @@
 
 > 本文件是 SAT2 科研协作制度在 Relay 实现仓库中的维护镜像。科研任务、PR、任务 YAML、精确 SHA、实验和证据仍以 `Upp-Ljl/sat2` 为权威事实。
 >
-> **Relay 2.2 聚焦覆盖规则。** 本文件原有的科学治理、证据边界、任务范围和人工高风险门继续有效；仅协作消息机制更新为 Relay 2.2。任何要求 Mentor/Worker Session 手写、校验或发布 Relay YAML、SHA、`parent_event_id`、actor、target、event ID 或 timestamp 的旧规则均停止使用。
+> **Relay 2.2.2 聚焦覆盖规则。** 本文件原有的科学治理、证据边界、任务范围和人工高风险门继续有效；仅协作消息机制更新为 Relay 2.2.2。任何要求 Mentor/Worker Session 手写、校验或发布 Relay YAML、SHA、`parent_event_id`、actor、target、event ID 或 timestamp 的旧规则均停止使用。
 >
-> 收到 Relay Capsule 的 Session 只输出正常科研报告，并在末尾提交一个带当前 `delivery_token` 的简短 Decision JSON。本地 Relay负责角色、状态、PR head、parent、correlation、SHA、路由、YAML 序列化、GitHub 评论发布、去重与恢复。完整规则见 [`docs/SAT2_CHAT_RELAY_PROTOCOL.md`](docs/SAT2_CHAT_RELAY_PROTOCOL.md)。
+> 收到 Relay Capsule 的 Session 只输出正常科研报告，并在末尾提交一个带当前 `delivery_token` 的简短 Decision JSON。本地 Relay 负责角色、状态、PR head、parent、correlation、SHA、路由、YAML 序列化、GitHub 评论发布、去重与恢复。完整规则见 [`docs/SAT2_CHAT_RELAY_PROTOCOL.md`](docs/SAT2_CHAT_RELAY_PROTOCOL.md)。
 >
-> Windows 采用按需启动：登录时不启动 Relay、不监听 8765、不注册登录计划任务；使用前运行 `SAT2 Relay - Start or Repair`。扩展在 daemon 在线时自动 heartbeat 和投递，但当前不能自行冷启动 Windows 进程。目标 Session 暂时未绑定或离线时，消息保持 `WAITING_FOR_ENDPOINT`，不视为永久失败。
+> Windows 继续采用按需启动：登录时不启动 Relay、不监听 8765、不注册登录计划任务。完成一次 extension ID 与受限 Native Messaging host 的本地配对后，日常直接在浏览器扩展点击“一键启动协作”，由插件启动本地 Relay、开启自动推进并执行首轮 heartbeat / poll / delivery。桌面 `SAT2 Relay - Start or Repair` 只保留为故障后备。目标 Session 暂时未绑定或离线时，消息保持等待，不视为科研失败。
 >
-> Relay 可以自动发布通过本地闸门的低风险控制评论，但不得自动 merge、mark ready、dispatch workflow、运行 qualification/formal experiment、修改 registry/seed/accepted evidence 或论文数字与 claim。首次任务授权和 `MENTOR_ACCEPTED` 默认仍需要本地人工确认。
+> 完整且可执行的 Mentor task 文档本身就是正常任务授权；Relay 自动生成兼容性的根控制事件并投递指定 Worker，不再要求用户重复点击“授权任务”。Mentor 按同一份冻结 task contract 审查并给出 `MENTOR_ACCEPTED` 后，Relay 校验通过即自动进入 `COMPLETE`，不再增加机械二次确认。只有 task 文档明确列出的 human gates、不可判定冲突或 `TASK_BLOCKED` 才暂停。Relay 仍不得自动 merge、mark ready、dispatch workflow、运行 qualification/formal experiment、修改 registry/seed/accepted evidence 或论文数字与 claim。
 >
-> 当前 Relay 2.2 状态为“已实现、待真实 Session 闭环验收”；在完成一次 `Decision JSON → GitHub comment → next Session Capsule` 现场闭环前，不得宣称长期稳定无人值守运行已经验证。
+> 扩展的“绑定 Session 回复完成提醒”独立于自动推进：自动推进关闭、甚至本地 daemon 停止时，只要具体 ChatGPT conversation 已绑定且扩展运行，新的 assistant 回复完成后仍可弹出浏览器通知；该提醒不产生 Relay 控制事件，也不改变任务状态。
+>
+> 当前 Relay 2.2.2 状态为“源码已实现、待真实 Windows + ChatGPT 闭环验收”；在完成一次 `插件一键启动 → Mentor 文档自动 dispatch → Worker checkpoint → Mentor review → next Session` 现场闭环前，不得宣称长期稳定无人值守运行已经验证。
 
 本文件是 SAT2 项目的长期协作、GitHub 操作和证据治理协议。任何新 session 开始工作前，必须先读取本文件、`.sat2/project.yml`、当前 open PR 及其任务文件。
 
@@ -235,11 +237,11 @@ MENTOR_REVIEW
 COMPLETE
 ```
 
-`SAT2_WORKER_ACK` 是信息事件，不改变 Protocol State，也不阻塞 Worker 当前授权范围内的工作。
+`SAT2_WORKER_ACK` 是兼容性信息事件，不改变 Protocol State，也不阻塞 Worker 当前 task contract 内的工作。正常 2.2.2 路径以 transcript-confirmed Capsule 作为传输收到证明。
 
 ## 9. Relay 决策与发布规则
 
-Relay 2.2 从当前 endpoint、任务 YAML、本地账本和 GitHub 重新读取并自动生成：
+Relay 2.2.2 从当前 endpoint、冻结 task contract、本地账本和 GitHub 重新读取并自动生成：
 
 ```text
 task / PR
@@ -267,12 +269,13 @@ fresh current PR head
 candidate/reviewed/control SHA binding
 fixed target routing
 allowed/forbidden paths
+frozen task-contract SHA-256
 outbox deduplication
 ```
 
-目标 endpoint 暂时不可用时保持 `WAITING_FOR_ENDPOINT`。GitHub POST 状态不确定时进入 `PUBLISH_UNCERTAIN`，先按稳定 marker 搜索已有评论，再决定是否重试，不生成重复控制评论。
+目标 endpoint 暂时不可用时保持等待。GitHub POST 状态不确定时进入 `PUBLISH_UNCERTAIN`，先按稳定 marker 搜索已有评论，再决定是否重试，不生成重复控制评论。
 
-首次任务授权由 Dashboard“授权任务”操作生成，用户不手写授权 YAML。`SAT2_MENTOR_ACCEPTED` 默认需要一次本地人工确认。
+完整且可执行的 Mentor task 文档由 Relay 自动生成 v2 兼容的根控制事件并 dispatch，无需 Dashboard 再授权。执行过程中 task 文档 hash 发生变化时 fail closed，必须显式 rebaseline/新任务。通过同一冻结 task contract 的 `SAT2_MENTOR_ACCEPTED` 校验后直接进入 `COMPLETE`。
 
 ## 10. GitHub Actions 策略
 
@@ -567,11 +570,12 @@ Worker 完成
 3. GitHub, task YAML and exact SHA are authoritative; chat and Relay storage are not.
 4. Sessions make scientific decisions; Relay validates, publishes and routes them.
 5. Sessions never handwrite Relay YAML or control fields when responding to a Capsule.
-6. Workflow execution is explicit, exact-SHA, and manual-only.
-7. Development audit is engineering validation, not paper evidence.
-8. Formal evidence requires raw, aggregate, manifest, hashes, seeds, and source snapshot.
-9. Mentor acceptance is required before paper integration.
-10. Sessions are replaceable; repository state is not.
-11. Merge and all high-risk gates require current explicit user authorization.
-12. Relay 2.2 remains field-acceptance pending until one real closed loop is observed.
+6. A complete Mentor task document is the normal authorization; ordinary task progression does not wait for duplicate human approval.
+7. Workflow execution is explicit, exact-SHA, and manual-only unless the task contract explicitly changes that human gate.
+8. Development audit is engineering validation, not paper evidence.
+9. Formal evidence requires raw, aggregate, manifest, hashes, seeds, and source snapshot.
+10. Mentor acceptance is required before paper integration; Relay Protocol COMPLETE is not itself evidence acceptance.
+11. Sessions are replaceable; repository state is not.
+12. Merge and all high-risk gates declared by governance/task contract require current explicit authorization.
+13. Relay 2.2.2 remains field-acceptance pending until one real closed loop is observed.
 ```
