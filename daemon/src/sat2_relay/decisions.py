@@ -359,12 +359,35 @@ class DecisionEngine:
             raise DecisionError("OUTBOX_NOT_WAITING", "Outbox is not waiting for human confirmation")
         return self.publish(outbox_id)
 
+    def _ensure_no_control_history_before_root(self, monitor: RepoMonitor) -> None:
+        """Do not create a second protocol root when GitHub already has control history.
+
+        A fresh/rebuilt local database can have no task_state while the PR still
+        contains valid or malformed Relay events after the configured start
+        boundary. Polling must reconstruct/reject that history first. Automatic
+        document dispatch is allowed only when that portion of GitHub is clean.
+        """
+        comments = self.service.github.list_issue_comments(self.service.repo_config.repository, monitor.pr_number)
+        for comment in comments:
+            comment_id = int(comment.get("id") or 0)
+            if monitor.start_after_comment_id and comment_id <= monitor.start_after_comment_id:
+                continue
+            body = str(comment.get("body") or "")
+            if "SAT2_RELAY_EVENT_V" in body or "```sat2-relay" in body:
+                raise DecisionError(
+                    "CONTROL_HISTORY_PENDING",
+                    f"PR #{monitor.pr_number} already contains Relay control history after the monitor start boundary "
+                    f"(comment {comment_id}); poll/reconcile that chain before creating a document-dispatch root.",
+                )
+
     def preview_document_dispatch(self, task_id: str) -> dict[str, Any]:
         config = self._config()
         monitor = self._monitor(task_id)
         state = self.db.task_state(task_id)
         if state and str(state["state"]) not in {"READY", "DORMANT"}:
             raise DecisionError("TASK_ALREADY_ACTIVE", f"Task {task_id} is already {state['state']}")
+        if not state:
+            self._ensure_no_control_history_before_root(monitor)
         pr = self.service.github.get_pull_request(config.repository, monitor.pr_number)
         if pr.get("state") != "open":
             raise DecisionError("PR_NOT_OPEN", f"PR #{monitor.pr_number} is {pr.get('state')}")
