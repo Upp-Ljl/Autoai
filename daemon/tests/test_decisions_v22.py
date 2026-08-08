@@ -6,7 +6,7 @@ from sat2_relay.db import RelayDB
 from sat2_relay.decisions import DecisionEngine, DecisionError
 from sat2_relay.models import DecisionSubmission, Heartbeat
 from sat2_relay.service import RelayService
-from test_service import AUTH_BODY, FakeGitHub, REPO_CONFIG
+from test_service import AUTH_BODY, FakeGitHub, REPO_CONFIG, TASK_SPEC
 
 
 class PublishingGitHub(FakeGitHub):
@@ -32,11 +32,11 @@ def configured_runtime(local_config):
     local = replace(local_config, allow_github_writes=True)
     db = RelayDB(local.database_path)
     gh = PublishingGitHub()
-    config = REPO_CONFIG.replace("protocol_version: sat2-relay/v1", "protocol_version: sat2-relay/v2").replace(
-        "process_existing_events_on_first_poll: true", "process_existing_events_on_first_poll: true"
+    config = REPO_CONFIG.replace("protocol_version: sat2-relay/v1", "protocol_version: sat2-relay/v2")
+    gh.get_content_text = lambda repository, path, ref: config if path == ".sat2/relay.yml" else TASK_SPEC
+    auth = AUTH_BODY.replace("SAT2_RELAY_EVENT_V1", "SAT2_RELAY_EVENT_V2").replace(
+        "protocol: sat2-relay/v1", "protocol: sat2-relay/v2"
     )
-    gh.get_content_text = lambda repository, path, ref: config if path == ".sat2/relay.yml" else "task_id: WP-B3\n"
-    auth = AUTH_BODY.replace("SAT2_RELAY_EVENT_V1", "SAT2_RELAY_EVENT_V2").replace("protocol: sat2-relay/v1", "protocol: sat2-relay/v2")
     gh.comments = [dict(gh.comments[0], body=auth)]
     service = RelayService(local, db, gh)
     service.poll_once()
@@ -46,9 +46,15 @@ def configured_runtime(local_config):
 def bind(db, installation_id, role, conversation_key):
     payload = Heartbeat.model_validate({
         "installation_id": installation_id,
-        "extension_version": "2.2.0",
+        "extension_version": "2.2.2",
         "auto_enabled": True,
-        "bindings": {role: {"url": f"https://chatgpt.com/c/{conversation_key.split(':',1)[1]}", "conversation_key": conversation_key, "composer_ready": True}},
+        "bindings": {
+            role: {
+                "url": f"https://chatgpt.com/c/{conversation_key.split(':',1)[1]}",
+                "conversation_key": conversation_key,
+                "composer_ready": True,
+            }
+        },
         "active_roles": [role],
     })
     db.record_heartbeat(payload.installation_id, payload.extension_version, payload.model_dump_json())
@@ -102,9 +108,10 @@ def test_worker_checkpoint_is_composed_published_and_routed(local_config):
     mentor_delivery = delivered_for(db, "mentor", "mentor-install-1")
     assert mentor_delivery.delivery_token
     assert "SAT2_RELAY_DECISION" in mentor_delivery.body
+    assert "Acceptance criteria:" in mentor_delivery.body
 
 
-def test_wrong_token_and_wrong_role_are_rejected(local_config):
+def test_wrong_token_is_rejected(local_config):
     _local, db, _gh, service = configured_runtime(local_config)
     bind(db, "worker-install-1", "S2", "c:worker")
     delivery = delivered_for(db, "S2", "worker-install-1")
@@ -147,27 +154,50 @@ def test_same_assistant_message_is_idempotent(local_config):
     assert len([row for row in gh.comments if "SAT2_RELAY_AUTO_EVENT" in row["body"]]) == 1
 
 
-def test_mentor_acceptance_waits_for_human_confirmation(local_config):
+def test_mentor_acceptance_publishes_without_extra_human_gate(local_config):
     _local, db, _gh, service = configured_runtime(local_config)
     bind(db, "worker-install-1", "S2", "c:worker")
     worker_delivery = delivered_for(db, "S2", "worker-install-1")
     engine = DecisionEngine(service, db)
     engine.submit(submission(
         worker_delivery,
-        installation="worker-install-1", role="S2", conversation="c:worker",
-        decision="WORKER_CHECKPOINT", message_hash="4" * 64, summary="checkpoint"
+        installation="worker-install-1",
+        role="S2",
+        conversation="c:worker",
+        decision="WORKER_CHECKPOINT",
+        message_hash="4" * 64,
+        summary="checkpoint",
     ))
     service.poll_once()
     bind(db, "mentor-install-1", "mentor", "c:mentor")
     mentor_delivery = delivered_for(db, "mentor", "mentor-install-1")
     result = engine.submit(submission(
         mentor_delivery,
-        installation="mentor-install-1", role="mentor", conversation="c:mentor",
-        decision="MENTOR_ACCEPTED", message_hash="5" * 64, summary="accepted source only"
+        installation="mentor-install-1",
+        role="mentor",
+        conversation="c:mentor",
+        decision="MENTOR_ACCEPTED",
+        message_hash="5" * 64,
+        summary="all frozen acceptance criteria satisfied",
     ))
-    assert result["waiting_for_human"] is True
-    assert result["outbox"]["status"] == "waiting_for_human"
-    confirmed = engine.confirm(int(result["outbox"]["id"]))
-    assert confirmed["status"] == "published"
+    assert result["waiting_for_human"] is False
+    assert result["outbox"]["status"] == "published"
     service.poll_once()
     assert db.task_state("WP-B3")["state"] == "COMPLETE"
+
+
+def test_worker_checkpoint_does_not_wait_for_ack(local_config):
+    _local, db, _gh, service = configured_runtime(local_config)
+    bind(db, "worker-install-1", "S2", "c:worker")
+    delivery = delivered_for(db, "S2", "worker-install-1")
+    engine = DecisionEngine(service, db)
+    result = engine.submit(submission(
+        delivery,
+        installation="worker-install-1",
+        role="S2",
+        conversation="c:worker",
+        decision="WORKER_CHECKPOINT",
+        message_hash="6" * 64,
+        summary="checkpoint without separate ACK",
+    ))
+    assert result["outbox"]["status"] == "published"
