@@ -2,7 +2,8 @@
   if (globalThis.__SAT2_RELAY_REPLY_WATCHER__) return;
   globalThis.__SAT2_RELAY_REPLY_WATCHER__ = true;
 
-  const STABLE_MS = 1600;
+  const STABLE_MS = 2500;
+  const BUSY_STABLE_MS = 900;
   const PORT_NAME = "SAT2_SESSION_REPLY_COMPLETE";
   const STOP_SELECTORS = [
     'button[data-testid="stop-button"]',
@@ -89,6 +90,15 @@
       return;
     }
 
+    const newAssistantMessage = !baseline || current.id !== baseline.id || current.count !== baseline.count;
+    if (!newAssistantMessage && !sawBusy) {
+      // Dynamic citations/buttons can mutate an already completed answer. Treat
+      // those changes as the new baseline instead of generating a false alert.
+      baseline = current;
+      clearCandidate();
+      return;
+    }
+
     const key = `${current.id}:${current.count}:${current.text.length}:${current.text.slice(-96)}`;
     if (candidateKey === key && timer) return;
     clearCandidate();
@@ -104,7 +114,7 @@
       sawBusy = false;
       candidateKey = "";
       emitCompleted(stable);
-    }, sawBusy ? 700 : STABLE_MS);
+    }, sawBusy ? BUSY_STABLE_MS : STABLE_MS);
   }
 
   const observer = new MutationObserver(() => inspect());
