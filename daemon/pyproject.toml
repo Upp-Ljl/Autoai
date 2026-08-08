@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sat2-relay"
-version = "2.2.0"
+version = "2.2.2"
 description = "Local fail-closed control plane for SAT2 ChatGPT Mentor/Worker relay"
 readme = "README.md"
 requires-python = ">=3.11"
