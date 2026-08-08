@@ -84,7 +84,7 @@ def test_heartbeat_builds_persistent_role_endpoint_registry(tmp_path):
     db = RelayDB(tmp_path / "state.sqlite3")
     payload = {
         "installation_id": "install-mentor-123",
-        "extension_version": "2.0.1",
+        "extension_version": "2.2.2",
         "auto_enabled": True,
         "bindings": {
             "mentor": {
@@ -96,7 +96,7 @@ def test_heartbeat_builds_persistent_role_endpoint_registry(tmp_path):
         },
         "active_roles": ["mentor"],
     }
-    db.record_heartbeat("install-mentor-123", "2.0.1", json.dumps(payload))
+    db.record_heartbeat("install-mentor-123", "2.2.2", json.dumps(payload))
     assert db.bound_roles_for_installation("install-mentor-123", 90) == {"mentor"}
     endpoints = db.fresh_role_endpoints(90)
     assert len(endpoints) == 1
