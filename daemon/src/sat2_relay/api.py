@@ -26,8 +26,8 @@ DASHBOARD = r"""<!doctype html>
 <title>SAT2 Relay 2.2</title><style>
 :root{font-family:Inter,system-ui,sans-serif;color:#18202a;background:#f4f6f8}body{margin:0}.wrap{max-width:1280px;margin:auto;padding:20px}.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.card{background:white;border:1px solid #dce2e8;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px #0000000b}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.ok{color:#08764f}.bad{color:#b42318}.warn{color:#b54708}.muted{color:#667085;font-size:13px}button,input{padding:8px 10px;border:1px solid #cdd5df;border-radius:7px;background:white}button{cursor:pointer}.primary{background:#1f6feb;color:white;border-color:#1f6feb}pre{white-space:pre-wrap;word-break:break-word;background:#101828;color:#e5e7eb;padding:12px;border-radius:8px;max-height:420px;overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:7px;border-bottom:1px solid #eaecf0;vertical-align:top}.pill{padding:2px 7px;border-radius:99px;background:#eef2f6;font-size:12px}.error{background:#fff1f0;border-color:#fecdca}.success{background:#ecfdf3;border-color:#abefc6}
 </style></head><body><div class='wrap'>
-<h1>SAT2 Relay Control Center 2.2</h1><p class='muted'>文档引导、多 Session 双向自动推进、本地发布闸门与恢复。</p>
-<div class='card'><div class='bar'><input id='token' type='password' size='48' placeholder='本地 API token'><button onclick='saveToken()'>保存</button><button class='primary' onclick='pollNow()'>立即轮询</button><button onclick='doctor()'>深度自检</button><button onclick='reloadCredentials()'>重载凭据</button><button onclick='diagnostics()'>导出诊断包</button><button onclick='refresh()'>刷新</button></div><div id='health'></div></div><div class='card'><h3>首次任务授权</h3><div class='bar'><input id='authTask' placeholder='task_id，例如 P0-B-WP-B'><input id='authSummary' size='64' value='Authorize the current source-only task within the reviewed task specification.'><button onclick='previewAuth()'>预览</button><button class='primary' onclick='authorizeTask()'>确认并发布授权</button></div><p class='muted'>Relay 自动读取 PR、head、task spec、角色与路径；无需手写 YAML。</p></div>
+<h1>SAT2 Relay Control Center 2.2</h1><p class='muted'>Mentor 文档驱动、多 Session 双向自动推进、本地发布闸门与恢复。有效且完整的 task 文档就是正常任务授权，不需要重复点击授权。</p>
+<div class='card'><div class='bar'><input id='token' type='password' size='48' placeholder='本地 API token'><button onclick='saveToken()'>保存</button><button class='primary' onclick='pollNow()'>立即轮询</button><button onclick='doctor()'>深度自检</button><button onclick='reloadCredentials()'>重载凭据</button><button onclick='diagnostics()'>导出诊断包</button><button onclick='refresh()'>刷新</button></div><div id='health'></div><p class='muted'>正常路径：Relay 自动发现 enabled monitor 对应的 Mentor task 文档；文档结构完整、PR/base/role/paths/dependencies 合法时自动生成根控制事件并投递 Worker。</p></div>
 <div class='grid'><div class='card'><h3>任务</h3><div id='tasks'></div></div><div class='card'><h3>投递队列</h3><div id='deliveries'></div></div><div class='card'><h3>发布 Outbox</h3><div id='outbox'></div></div></div>
 <div class='card'><h3>未解决警报</h3><div id='alerts'></div></div>
 <div class='card'><h3>最近评论处理</h3><div id='comments'></div></div>
@@ -36,16 +36,13 @@ DASHBOARD = r"""<!doctype html>
 const token=()=>localStorage.getItem('sat2RelayToken')||document.getElementById('token').value;
 function saveToken(){localStorage.setItem('sat2RelayToken',document.getElementById('token').value);refresh()}
 async function api(path,opt={}){opt.headers={...(opt.headers||{}),'X-SAT2-Relay-Token':token()};if(opt.body&&typeof opt.body!=='string'){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(opt.body)}const r=await fetch(path,opt);const t=await r.text();if(!r.ok)throw new Error('HTTP '+r.status+': '+t);return t?JSON.parse(t):null}
-function esc(x){return String(x??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function esc(x){return String(x??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[m]))}
 function table(rows,cols){if(!rows.length)return '<p class=muted>无</p>';return '<table><thead><tr>'+cols.map(c=>'<th>'+esc(c[0])+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+cols.map(c=>'<td>'+esc(typeof c[1]==='function'?c[1](r):r[c[1]])+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}
-async function refresh(){try{const s=await api('/api/v2/status');const h=s.health;document.getElementById('health').innerHTML=`<p class=${h.ok?'ok':'bad'}>服务 ${h.ok?'在线':'异常'} · ${esc(h.mode)} · 最近轮询 ${esc(h.last_poll||'尚无')} · 待投递 ${h.pending_deliveries}</p>`;document.getElementById('tasks').innerHTML=table(s.tasks||[],[['Task','task_id'],['State','state'],['PR',r=>'#'+r.pr_number],['SHA','sha'],['Updated','updated_at']]);document.getElementById('deliveries').innerHTML=table((s.deliveries||[]).slice(0,30),[['ID','id'],['Event','event_id'],['Role','target_role'],['Status','status'],['Attempts','attempt_count'],['Last code','last_code']]);document.getElementById('outbox').innerHTML=(s.outbox||[]).slice(0,30).map(r=>`<div class='card ${r.status==='blocked'?'error':''}'><b>#${esc(r.id)} ${esc(r.task_id)} · ${esc(r.decision)}</b><div>${esc(r.status)} · comment ${esc(r.github_comment_id||'-')} · ${esc(r.last_error_code||'')}</div>${r.status==='waiting_for_human'?`<button onclick='confirmOutbox(${r.id})'>确认 Mentor Accepted</button>`:''}</div>`).join('')||'<p class=muted>无</p>';const alerts=(s.alerts||[]).filter(a=>!a.resolved_at);document.getElementById('alerts').innerHTML=alerts.length?alerts.map(a=>`<div class='card error'><b>${esc(a.code)}</b> · ${esc(a.task_id||'')} · PR ${esc(a.pr_number||'')}<pre>${esc(a.detail)}</pre><button onclick='resolveAlert(${a.id})'>标记已解决</button></div>`).join(''):'<p class=ok>无未解决警报</p>';document.getElementById('comments').innerHTML=table((s.comments||[]).slice(0,30),[['PR','pr_number'],['Comment','comment_id'],['Outcome','outcome'],['Retries','retry_count'],['Error','last_error']]);document.getElementById('out').textContent=JSON.stringify(s.health,null,2)}catch(e){document.getElementById('health').innerHTML='<p class=bad>'+esc(e)+'</p>'}}
+async function refresh(){try{const s=await api('/api/v2/status');const h=s.health;document.getElementById('health').innerHTML=`<p class=${h.ok?'ok':'bad'}>服务 ${h.ok?'在线':'异常'} · ${esc(h.mode)} · v${esc(h.version)} · 最近轮询 ${esc(h.last_poll||'尚无')} · 待投递 ${h.pending_deliveries}</p>`;document.getElementById('tasks').innerHTML=table(s.tasks||[],[['Task','task_id'],['State','state'],['PR',r=>'#'+r.pr_number],['SHA','sha'],['Updated','updated_at']]);document.getElementById('deliveries').innerHTML=table((s.deliveries||[]).slice(0,30),[['ID','id'],['Event','event_id'],['Role','target_role'],['Status','status'],['Attempts','attempt_count'],['Last code','last_code']]);document.getElementById('outbox').innerHTML=(s.outbox||[]).slice(0,30).map(r=>`<div class='card ${r.status==='blocked'?'error':''}'><b>#${esc(r.id)} ${esc(r.task_id)} · ${esc(r.decision)}</b><div>${esc(r.status)} · comment ${esc(r.github_comment_id||'-')} · ${esc(r.last_error_code||'')}</div></div>`).join('')||'<p class=muted>无</p>';const alerts=(s.alerts||[]).filter(a=>!a.resolved_at);document.getElementById('alerts').innerHTML=alerts.length?alerts.map(a=>`<div class='card error'><b>${esc(a.code)}</b> · ${esc(a.task_id||'')} · PR ${esc(a.pr_number||'')}<pre>${esc(a.detail)}</pre><button onclick='resolveAlert(${a.id})'>标记已解决</button></div>`).join(''):'<p class=ok>无未解决警报</p>';document.getElementById('comments').innerHTML=table((s.comments||[]).slice(0,30),[['PR','pr_number'],['Comment','comment_id'],['Outcome','outcome'],['Retries','retry_count'],['Error','last_error']]);document.getElementById('out').textContent=JSON.stringify(s.health,null,2)}catch(e){document.getElementById('health').innerHTML='<p class=bad>'+esc(e)+'</p>'}}
 async function pollNow(){document.getElementById('out').textContent=JSON.stringify(await api('/api/v2/control/poll',{method:'POST'}),null,2);refresh()}
 async function doctor(){document.getElementById('out').textContent=JSON.stringify(await api('/api/v2/doctor?deep=true'),null,2);refresh()}
 async function reloadCredentials(){document.getElementById('out').textContent=JSON.stringify(await api('/api/v2/control/reload-credentials',{method:'POST'}),null,2);refresh()}
 async function diagnostics(){const value=await api('/api/v2/diagnostics/export');const text=JSON.stringify(value,null,2);document.getElementById('out').textContent=text;try{await navigator.clipboard.writeText(text)}catch(e){}}
-async function previewAuth(){const task=document.getElementById('authTask').value.trim();const summary=document.getElementById('authSummary').value.trim();document.getElementById('out').textContent=JSON.stringify(await api('/api/v2/tasks/'+encodeURIComponent(task)+'/authorize/preview',{method:'POST',body:{summary,confirm:false}}),null,2)}
-async function authorizeTask(){const task=document.getElementById('authTask').value.trim();const summary=document.getElementById('authSummary').value.trim();if(!confirm('确认由 Relay 发布任务授权？'))return;document.getElementById('out').textContent=JSON.stringify(await api('/api/v2/tasks/'+encodeURIComponent(task)+'/authorize',{method:'POST',body:{summary,confirm:true}}),null,2);refresh()}
-async function confirmOutbox(id){if(!confirm('确认发布 Mentor Accepted？'))return;document.getElementById('out').textContent=JSON.stringify(await api('/api/v2/outbox/'+id+'/confirm',{method:'POST',body:{confirm:true}}),null,2);refresh()}
 async function resolveAlert(id){await api('/api/v2/alerts/'+id+'/resolve',{method:'POST'});refresh()}
 document.getElementById('token').value=localStorage.getItem('sat2RelayToken')||'';refresh();setInterval(refresh,10000);
 </script></div></body></html>"""
@@ -94,7 +91,7 @@ def create_app(local: LocalConfig, db: RelayDB, service: RelayService, poll_enab
         if task:
             await task
 
-    app = FastAPI(title="SAT2 Relay", version="2.2.0", lifespan=lifespan)
+    app = FastAPI(title="SAT2 Relay", version="2.2.2", lifespan=lifespan)
     decision_engine = DecisionEngine(service, db)
 
     def auth(x_sat2_relay_token: str | None = Header(default=None)) -> None:
@@ -105,7 +102,7 @@ def create_app(local: LocalConfig, db: RelayDB, service: RelayService, poll_enab
         heartbeat = db.latest_heartbeat()
         return {
             "ok": True,
-            "version": "2.2.0",
+            "version": "2.2.2",
             "mode": service.effective_mode().value,
             "repository": local.github_repository,
             "config_ref": local.repository_config_ref,
@@ -159,7 +156,7 @@ def create_app(local: LocalConfig, db: RelayDB, service: RelayService, poll_enab
             outbox.append(clean)
         return {
             "generated_at": datetime.now(UTC).isoformat(),
-            "version": "2.2.0",
+            "version": "2.2.2",
             "health": health_payload(),
             "doctor": service.doctor(deep=True),
             "config": {
@@ -301,6 +298,8 @@ def create_app(local: LocalConfig, db: RelayDB, service: RelayService, poll_enab
             status = 409 if exc.code not in {"ENDPOINT_NOT_BOUND", "NO_ACTIVE_DELIVERY"} else 404
             raise HTTPException(status_code=status, detail={"code": exc.code, "detail": exc.detail}) from None
 
+    # Compatibility-only endpoints for legacy 2.2 outboxes/clients. Normal 2.2.2
+    # operation never asks the user to authorize a task or confirm Mentor Accepted.
     @app.post("/api/v2/outbox/{outbox_id}/confirm", dependencies=[Depends(auth)])
     def confirm_outbox(outbox_id: int, payload: HumanConfirmation) -> dict:
         if not payload.confirm:
@@ -317,16 +316,16 @@ def create_app(local: LocalConfig, db: RelayDB, service: RelayService, poll_enab
     @app.post("/api/v2/tasks/{task_id}/authorize/preview", dependencies=[Depends(auth)])
     def preview_authorization(task_id: str, payload: TaskAuthorizationRequest) -> dict:
         try:
-            return {"ok": True, "preview": decision_engine.preview_authorization(task_id, payload.summary)}
+            return {"ok": True, "preview": decision_engine.preview_authorization(task_id, payload.summary), "deprecated": True}
         except DecisionError as exc:
             raise HTTPException(status_code=409, detail={"code": exc.code, "detail": exc.detail}) from None
 
     @app.post("/api/v2/tasks/{task_id}/authorize", dependencies=[Depends(auth)])
     def authorize_task(task_id: str, payload: TaskAuthorizationRequest) -> dict:
-        if not payload.confirm:
-            raise HTTPException(status_code=409, detail={"code": "HUMAN_CONFIRMATION_REQUIRED", "detail": "Set confirm=true after reviewing the preview"})
         try:
-            return decision_engine.authorize(task_id, payload.summary)
+            result = decision_engine.authorize(task_id, payload.summary)
+            result["deprecated"] = True
+            return result
         except DecisionError as exc:
             raise HTTPException(status_code=409, detail={"code": exc.code, "detail": exc.detail}) from None
 
