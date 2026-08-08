@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -122,7 +121,7 @@ class DecisionEngine:
             EventType.TASK_AUTHORIZED.value,
             EventType.MENTOR_CHANGES_REQUIRED.value,
         }:
-            raise DecisionError("DELIVERY_CAUSATION_MISMATCH", "Worker decisions require an authorization or changes-required Capsule")
+            raise DecisionError("DELIVERY_CAUSATION_MISMATCH", "Worker decisions require a task-dispatch or changes-required Capsule")
         if decision is DecisionName.WORKER_ACK and event_type not in {
             EventType.TASK_AUTHORIZED.value,
             EventType.MENTOR_CHANGES_REQUIRED.value,
@@ -156,9 +155,7 @@ class DecisionEngine:
             "repository": self.service.repo_config.repository,
             "task_id": monitor.task_id,
             "actor_role": submission.role,
-            "target_role": resolve_target(
-                RelayEvent.model_construct(event_type=event_type), monitor
-            ),
+            "target_role": resolve_target(RelayEvent.model_construct(event_type=event_type), monitor),
             "pr_number": monitor.pr_number,
             "parent_event_id": parent_event_id,
             "correlation_id": correlation,
@@ -178,17 +175,20 @@ class DecisionEngine:
             if reviewed != head:
                 raise DecisionError("STALE_PR_HEAD", f"Checkpoint SHA {reviewed} differs from current PR head {head}")
             fields["reviewed_sha"] = reviewed
-        elif event_type is EventType.WORKER_ACK:
-            # ACK is informational and does not create a new scientific SHA.
-            fields["control_head_sha"] = head
-        elif event_type is EventType.TASK_BLOCKED:
+        elif event_type in {EventType.WORKER_ACK, EventType.TASK_BLOCKED}:
             fields["control_head_sha"] = head
         event = RelayEvent.model_validate(fields)
         validate_actor_semantics(event, monitor)
-        commits = {str(row.get("sha") or "") for row in self.service.github.list_pull_request_commits(self.service.repo_config.repository, monitor.pr_number)}
+        commits = {
+            str(row.get("sha") or "")
+            for row in self.service.github.list_pull_request_commits(self.service.repo_config.repository, monitor.pr_number)
+        }
         validate_pr_binding(event, pr, commits)
         validate_transition(event, task_state, parent_event_id)
-        changed = [str(row.get("filename") or "") for row in self.service.github.list_pull_request_files(self.service.repo_config.repository, monitor.pr_number)]
+        changed = [
+            str(row.get("filename") or "")
+            for row in self.service.github.list_pull_request_files(self.service.repo_config.repository, monitor.pr_number)
+        ]
         self.service._validate_monitor_contract(monitor, pr, changed, event)
         if base != str((pr.get("base") or {}).get("sha") or ""):
             raise DecisionError("STALE_PR_BASE", "PR base changed during event composition")
@@ -216,18 +216,14 @@ class DecisionEngine:
             raise DecisionError("DELIVERY_ALREADY_CONSUMED", "The active Capsule already produced a terminal decision")
         self._validate_delivery_origin(submission.role, submission.decision, str(context.get("event_type") or ""))
         if submission.decision is DecisionName.WORKER_ACK and self.db.ack_exists_for_delivery(submission.delivery_id):
-            existing = self.db.decision_exists_for_message(submission.delivery_id, submission.assistant_message_hash, submission.decision.value)
+            existing = self.db.decision_exists_for_message(
+                submission.delivery_id, submission.assistant_message_hash, submission.decision.value
+            )
             if existing:
                 return {"ok": True, "duplicate": True, "outbox": dict(existing)}
             raise DecisionError("ACK_ALREADY_RECORDED", "This Capsule already produced a Worker ACK")
-        if submission.decision is DecisionName.WORKER_CHECKPOINT:
-            ack = self.db.ack_outbox_for_delivery(submission.delivery_id)
-            if ack:
-                if ack.get("status") != OutboxStatus.PUBLISHED.value:
-                    raise DecisionError("ACK_PENDING_PUBLISH", "Worker ACK exists but has not been published yet")
-                current = self.db.task_state(str(context["task_id"]))
-                if not current or str(current["last_event_id"]) != str(ack.get("event_id")):
-                    raise DecisionError("ACK_PENDING_LEDGER", "Worker ACK is published but has not been accepted by the local GitHub ledger yet")
+        # WORKER_ACK is legacy/informational only. A checkpoint never waits for
+        # an ACK; the confirmed delivery marker already proves receipt.
 
         task_id = str(context["task_id"])
         monitor = self._monitor(task_id)
@@ -258,10 +254,8 @@ class DecisionEngine:
             event_marker=marker,
             event_payload_json=event.model_dump_json(),
             comment_body=body,
-            waiting_for_human=submission.decision is DecisionName.MENTOR_ACCEPTED,
+            waiting_for_human=False,
         )
-        if row["status"] == OutboxStatus.WAITING_FOR_HUMAN.value:
-            return {"ok": True, "created": created, "waiting_for_human": True, "outbox": row}
         published = self.publish(int(row["id"]))
         return {"ok": True, "created": created, "waiting_for_human": False, "outbox": published}
 
@@ -276,8 +270,14 @@ class DecisionEngine:
         event = RelayEvent.model_validate_json(str(row["event_payload_json"]))
         monitor = self._monitor(event.task_id)
         state = self.db.task_state(event.task_id)
-        if not state or str(state["last_event_id"]) != str(event.parent_event_id or ""):
-            raise DecisionError("PARENT_EVENT_MISMATCH", f"Current parent is {state['last_event_id'] if state else None}, event expects {event.parent_event_id}")
+        if event.event_type is EventType.TASK_AUTHORIZED:
+            if state and str(state["state"]) not in {"READY", "DORMANT"}:
+                raise DecisionError("TASK_ALREADY_ACTIVE", f"Task {event.task_id} is already {state['state']}")
+        elif not state or str(state["last_event_id"]) != str(event.parent_event_id or ""):
+            raise DecisionError(
+                "PARENT_EVENT_MISMATCH",
+                f"Current parent is {state['last_event_id'] if state else None}, event expects {event.parent_event_id}",
+            )
         pr = self.service.github.get_pull_request(self.service.repo_config.repository, monitor.pr_number)
         if pr.get("state") != "open":
             raise DecisionError("PR_NOT_OPEN", f"PR #{monitor.pr_number} is {pr.get('state')}")
@@ -297,9 +297,11 @@ class DecisionEngine:
         if row["status"] == OutboxStatus.PUBLISHED.value:
             return row
         if row["status"] == OutboxStatus.WAITING_FOR_HUMAN.value:
-            raise DecisionError("WAITING_FOR_HUMAN", "This decision requires local human confirmation")
+            raise DecisionError("WAITING_FOR_HUMAN", "Legacy outbox is waiting for local confirmation")
         if not self.service.local.allow_github_writes:
-            self.db.mark_outbox_error(outbox_id, OutboxStatus.BLOCKED, "GITHUB_WRITES_DISABLED", "github.allow_writes is false")
+            self.db.mark_outbox_error(
+                outbox_id, OutboxStatus.BLOCKED, "GITHUB_WRITES_DISABLED", "github.allow_writes is false"
+            )
             raise DecisionError("GITHUB_WRITES_DISABLED", "Enable github.allow_writes in the local Relay config")
         self._config()
         event, monitor, _pr = self._revalidate_outbox(row)
@@ -318,8 +320,10 @@ class DecisionEngine:
             status = OutboxStatus.PUBLISH_UNCERTAIN if exc.retryable else OutboxStatus.BLOCKED
             self.db.mark_outbox_error(outbox_id, status, "GITHUB_PUBLISH_FAILED", str(exc), 10)
             raise DecisionError("GITHUB_PUBLISH_FAILED", str(exc)) from exc
-        except Exception as exc:  # network timeout can leave POST outcome unknown
-            self.db.mark_outbox_error(outbox_id, OutboxStatus.PUBLISH_UNCERTAIN, "GITHUB_PUBLISH_UNCERTAIN", str(exc), 10)
+        except Exception as exc:
+            self.db.mark_outbox_error(
+                outbox_id, OutboxStatus.PUBLISH_UNCERTAIN, "GITHUB_PUBLISH_UNCERTAIN", str(exc), 10
+            )
             raise DecisionError("GITHUB_PUBLISH_UNCERTAIN", str(exc)) from exc
         self.db.mark_outbox_published(outbox_id, int(result["id"]), str(result.get("html_url") or ""))
         return self.db.outbox_row(outbox_id) or row
@@ -333,13 +337,21 @@ class DecisionEngine:
                 if result.get("status") == OutboxStatus.PUBLISHED.value:
                     counts["published"] += 1
             except DecisionError as exc:
-                if exc.code in {"STALE_PR_HEAD", "PARENT_EVENT_MISMATCH", "PR_NOT_OPEN", "GITHUB_WRITES_DISABLED"}:
+                if exc.code in {
+                    "STALE_PR_HEAD",
+                    "PARENT_EVENT_MISMATCH",
+                    "PR_NOT_OPEN",
+                    "GITHUB_WRITES_DISABLED",
+                    "TASK_ALREADY_ACTIVE",
+                }:
                     counts["blocked"] += 1
                 else:
                     counts["retry"] += 1
         return counts
 
     def confirm(self, outbox_id: int) -> dict[str, Any]:
+        # Backward compatibility for old 2.2 outboxes only. New document-driven
+        # Mentor Accepted decisions are published automatically.
         if not self.db.confirm_outbox(outbox_id):
             row = self.db.outbox_row(outbox_id)
             if row and row["status"] == OutboxStatus.PUBLISHED.value:
@@ -347,28 +359,38 @@ class DecisionEngine:
             raise DecisionError("OUTBOX_NOT_WAITING", "Outbox is not waiting for human confirmation")
         return self.publish(outbox_id)
 
-    def preview_authorization(self, task_id: str, summary: str) -> dict[str, Any]:
+    def preview_document_dispatch(self, task_id: str) -> dict[str, Any]:
         config = self._config()
         monitor = self._monitor(task_id)
         state = self.db.task_state(task_id)
-        if state and str(state["state"]) not in {"READY", "DORMANT", "BLOCKED", "CANCELLED", "COMPLETE", "ACCEPTED"}:
+        if state and str(state["state"]) not in {"READY", "DORMANT"}:
             raise DecisionError("TASK_ALREADY_ACTIVE", f"Task {task_id} is already {state['state']}")
         pr = self.service.github.get_pull_request(config.repository, monitor.pr_number)
         if pr.get("state") != "open":
             raise DecisionError("PR_NOT_OPEN", f"PR #{monitor.pr_number} is {pr.get('state')}")
         task_spec = self.service.load_task_spec(monitor, pr)
+        self.service.validate_task_spec_ready(monitor, pr, task_spec)
+        self.service._validate_dependencies(monitor)
+        self.service._validate_scope_conflicts(monitor)
         head = self._head(pr)
         base = self._base(pr)
-        key_material = "\n".join([task_id, "TASK_AUTHORIZED", base, head, summary])
+        summary = (
+            f"Mentor-authored task document {monitor.task_file} is executable and complete enough for automatic dispatch; "
+            f"Relay is starting {task_id} on {monitor.worker_role} without an additional human authorization step."
+        )
+        key_material = "\n".join([task_id, "DOCUMENT_DISPATCH", task_spec.sha256, base, head])
         digest = _sha256(key_material)
         event = RelayEvent.model_validate(
             {
                 "protocol": "sat2-relay/v2",
+                # Retain SAT2_TASK_AUTHORIZED on the wire for v2 compatibility.
+                # In 2.2.2 it is a deterministic document-dispatch root event,
+                # not a separate user authorization gate.
                 "event_id": _event_id(task_id, digest),
                 "event_type": EventType.TASK_AUTHORIZED.value,
                 "repository": config.repository,
                 "task_id": task_id,
-                "actor_role": "user",
+                "actor_role": "mentor",
                 "target_role": monitor.worker_role,
                 "pr_number": monitor.pr_number,
                 "base_sha": base,
@@ -381,9 +403,13 @@ class DecisionEngine:
                 "summary": summary,
             }
         )
-        commits = {str(row.get("sha") or "") for row in self.service.github.list_pull_request_commits(config.repository, monitor.pr_number)}
+        commits = {
+            str(row.get("sha") or "")
+            for row in self.service.github.list_pull_request_commits(config.repository, monitor.pr_number)
+        }
         validate_actor_semantics(event, monitor)
         validate_pr_binding(event, pr, commits)
+        validate_transition(event, state["state"] if state else None, state["last_event_id"] if state else None)
         marker = _event_marker(digest)
         return {
             "task_id": task_id,
@@ -399,19 +425,22 @@ class DecisionEngine:
             "decision_key": digest,
         }
 
-    def authorize(self, task_id: str, summary: str) -> dict[str, Any]:
-        preview = self.preview_authorization(task_id, summary)
+    def dispatch_document(self, task_id: str) -> dict[str, Any]:
+        state = self.db.task_state(task_id)
+        if state and str(state["state"]) not in {"READY", "DORMANT"}:
+            return {"ok": True, "created": False, "skipped": "task_already_has_protocol_state", "state": dict(state)}
+        preview = self.preview_document_dispatch(task_id)
         event = RelayEvent.model_validate(preview["event"])
         created, row = self.db.create_outbox(
             decision_key=str(preview["decision_key"]),
             delivery_id=None,
             task_id=task_id,
-            actor_role="user",
+            actor_role="mentor",
             conversation_key=None,
             assistant_message_id=None,
             assistant_message_hash=None,
-            decision="TASK_AUTHORIZED",
-            summary=summary,
+            decision="DOCUMENT_DISPATCH",
+            summary=str(event.summary or "Mentor task document dispatch"),
             event_id=event.event_id,
             event_marker=str(preview["event_marker"]),
             event_payload_json=event.model_dump_json(),
@@ -420,3 +449,13 @@ class DecisionEngine:
         )
         result = self.publish(int(row["id"]))
         return {"ok": True, "created": created, "outbox": result}
+
+    # Backward-compatible API names. They no longer represent a required human
+    # gate; normal operation uses dispatch_document() automatically from poll.
+    def preview_authorization(self, task_id: str, summary: str) -> dict[str, Any]:
+        _ = summary
+        return self.preview_document_dispatch(task_id)
+
+    def authorize(self, task_id: str, summary: str) -> dict[str, Any]:
+        _ = summary
+        return self.dispatch_document(task_id)
