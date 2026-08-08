@@ -3,6 +3,7 @@
   globalThis.__SAT2_RELAY_REPLY_WATCHER__ = true;
 
   const STABLE_MS = 1600;
+  const PORT_NAME = "SAT2_SESSION_REPLY_COMPLETE";
   const STOP_SELECTORS = [
     'button[data-testid="stop-button"]',
     'button[data-testid="composer-stop-button"]',
@@ -35,11 +36,7 @@
     const element = messages[index];
     const text = textOf(element);
     if (!text) return null;
-    return {
-      id: identity(element, index),
-      text,
-      count: messages.length
-    };
+    return {id: identity(element, index), text, count: messages.length};
   }
 
   function same(left, right) {
@@ -52,10 +49,10 @@
     timer = null;
   }
 
-  async function emitCompleted(snapshot) {
+  function emitCompleted(snapshot) {
     try {
-      await chrome.runtime.sendMessage({
-        type: "SAT2_SESSION_REPLY_COMPLETE",
+      const port = chrome.runtime.connect({name: PORT_NAME});
+      port.postMessage({
         messageId: snapshot.id,
         assistantText: snapshot.text.slice(0, 1200),
         assistantLength: snapshot.text.length,
@@ -64,6 +61,9 @@
         observedUrl: location.href,
         completedAt: new Date().toISOString()
       });
+      setTimeout(() => {
+        try { port.disconnect(); } catch {}
+      }, 250);
     } catch {}
   }
 
@@ -89,9 +89,6 @@
       return;
     }
 
-    // A changed/new assistant message after the baseline is eligible. sawBusy is
-    // useful evidence but is not mandatory because ChatGPT DOM revisions may hide
-    // the stop button from the watcher. Stability is checked again before emit.
     const key = `${current.id}:${current.count}:${current.text.length}:${current.text.slice(-96)}`;
     if (candidateKey === key && timer) return;
     clearCandidate();
