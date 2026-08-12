@@ -89,7 +89,11 @@ function eventTypeFrom(resourceType) {
 }
 
 async function push(kind, data) {
-  records.push({ts: iso(), kind, case: activeCase, ...data});
+  const resolved = {};
+  for (const [k, v] of Object.entries(data)) {
+    resolved[k] = v instanceof Promise ? await v : v;
+  }
+  records.push({ts: iso(), kind, case: activeCase, ...resolved});
   if (records.length >= FLUSH_AFTER) await flush();
   // keep the in-memory window bounded; full history lives in storage
   if (records.length > 2000) await flush();
