@@ -119,6 +119,9 @@ function extractAssistant(events) {
         hasError = true;
         if (typeof v.error_code === "string") errorCode = v.error_code;
         else if (typeof v.error === "string") errorCode = v.error;
+        else if (v.error && typeof v.error === "object" && typeof v.error.code === "string") {
+          errorCode = v.error.code;
+        }
       }
       if (typeof v === "string") finalText += v;
       else if (Array.isArray(v)) {
@@ -283,6 +286,10 @@ function sseStructure(events) {
       v_schema: schemaOf(ev?.v),
       o_schema: schemaOf(ev?.o),
       p_schema: schemaOf(ev?.p),
+      error_schema:
+        ev?.v && typeof ev.v === "object" && ev.v.error !== undefined
+          ? schemaOf(ev.v.error)
+          : null,
       message_keys: ev?.message && typeof ev.message === "object" ? Object.keys(ev.message).sort() : null,
       has_content: Boolean(ev?.message?.content),
       msg_role: ev?.message?.author?.role || null,
