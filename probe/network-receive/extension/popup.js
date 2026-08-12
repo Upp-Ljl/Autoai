@@ -7,12 +7,11 @@ function setAttached(state, detail) {
   attached = state;
   $("attachAll").disabled = state;
   $("detach").disabled = !state;
-  ["mShort", "mLong", "mGit", "mCap", "mConc"].forEach((id) => ($(id).disabled = !state));
   $("export").disabled = !state;
   $("clear").disabled = false;
   $("status").textContent = state
-    ? (detail || "已附着。") + "\n标记 → 发消息 → 等回复结束 → 标记下一项 → … → 导出"
-    : "未附着。打开 ChatGPT 测试会话后点「附着所有 ChatGPT 标签页」。";
+    ? (detail || "已附着。") + "\n直接发送消息即可，无需标记。"
+    : "未附着。打开 ChatGPT 测试会话后点「① 附着所有 ChatGPT 标签页」。";
 }
 
 (async function init() {
@@ -33,21 +32,6 @@ $("detach").addEventListener("click", async () => {
   await send({type: "NR_DETACH"});
   setAttached(false);
 });
-
-const marks = [
-  ["mShort", "short", "普通短回复"],
-  ["mLong", "long", "长回复"],
-  ["mGit", "github", "@GitHub 只读"],
-  ["mCap", "capsule", "SAT2 风格 Capsule"],
-  ["mConc", "concurrent", "双 Tab 并发"],
-];
-for (const [id, caseName, label] of marks) {
-  $(id).addEventListener("click", async () => {
-    await send({type: "NR_MARK", case: caseName, label});
-    $("status").textContent = `已标记「${label}」。发消息并等回复结束。`;
-    $("status").className = "status ok";
-  });
-}
 
 $("export").addEventListener("click", async () => {
   $("status").textContent = "正在导出…";

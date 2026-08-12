@@ -53,11 +53,15 @@ function parsePostBody(tabId, requestId, postData) {
   try {
     const body = JSON.parse(postData);
     const mid = body?.message?.id;
+    const content = body?.message?.content;
     return {
       conversation_id: body?.conversation_id || null,
       parent_message_id: body?.parent_message_id || null,
       message_id: Array.isArray(mid) ? (mid[0] || null) : (mid || null),
-      user_text_hash: body?.message?.content ? sha256Text(JSON.stringify(body.message.content)) : null,
+      user_text_hash: content ? sha256Text(JSON.stringify(content)) : null,
+      // classification signals (non-sensitive booleans/lengths, computed in memory)
+      contains_at_github: String(postData).includes("@GitHub"),
+      user_text_len: String(JSON.stringify(content || "")).length,
     };
   } catch {
     return null;
@@ -205,6 +209,8 @@ function onDebuggerEvent(source, method, params) {
         parent_message_id_hash: parsed.parent_message_id ? hashOf(parsed.parent_message_id) : null,
         message_id_hash: parsed.message_id ? hashOf(parsed.message_id) : null,
         user_text_hash: parsed.user_text_hash,
+        contains_at_github: parsed.contains_at_github,
+        user_text_len: parsed.user_text_len,
       });
       break;
     }

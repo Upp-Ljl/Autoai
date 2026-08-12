@@ -11,6 +11,19 @@ import sys
 from pathlib import Path
 
 
+def classify(turn_start: dict, complete: dict) -> str:
+    """Auto-classify a turn without any UI markers."""
+    if complete and complete.get("decision_transport"):
+        return "capsule"
+    if turn_start and turn_start.get("contains_at_github"):
+        return "github"
+    if turn_start and (turn_start.get("user_text_len") or 0) > 200:
+        return "long"
+    if complete and (complete.get("sse_bytes") or 0) > 3000:
+        return "long"
+    return "short"
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("usage: python compare3a.py <probe.jsonl> [output_dir]")
@@ -27,6 +40,15 @@ def main() -> int:
         except json.JSONDecodeError:
             continue
 
+    # pair each turn_start with its turn_complete via (tab_id, request_id)
+    starts = {f"{r.get('tab_id')}:{r.get('request_id')}": r for r in rows if r.get("kind") == "turn_start"}
+    completed = [r for r in rows if r.get("kind") == "turn_complete"]
+    for r in completed:
+        r["_class"] = classify(
+            starts.get(f"{r.get('tab_id')}:{r.get('request_id')}"),
+            r,
+        )
+
     report: dict = {
         "source": path.name,
         "records": len(rows),
@@ -35,10 +57,9 @@ def main() -> int:
         "summary": {},
     }
 
-    completed = [r for r in rows if r.get("kind") == "turn_complete"]
     report["turns"] = [
         {
-            "case": r.get("case"),
+            "class": r.get("_class"),
             "ts": r.get("ts"),
             "conversation_id_hash": (r.get("conversation_id_hash") or "")[:12],
             "message_id_hash": (r.get("message_id_hash") or "")[:12],
@@ -55,7 +76,7 @@ def main() -> int:
 
     per_case: dict[str, dict] = {}
     for r in completed:
-        case = r.get("case") or "unmarked"
+        case = r.get("_class") or "unmarked"
         c = per_case.setdefault(
             case, {"turns": 0, "transport_completed": 0, "decision_both": 0, "match": 0, "mismatch": 0, "errors": 0}
         )
