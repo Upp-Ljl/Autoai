@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "SAT2 Network-First Receive (3A Shadow)",
+  "version": "0.1.0",
+  "description": "Experimental network-first receive shadow. Reads completed SSE responses via read-only CDP getResponseBody, parses SAT2_RELAY_DECISION, compares against the DOM detector. Shadow only: never submits to the daemon.",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SAT2 Network Receive (3A)"
+  }
+}

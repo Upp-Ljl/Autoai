@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 330px; font-family: system-ui, sans-serif; font-size: 13px; margin: 0; padding: 12px; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  .row { margin: 6px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  button { padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; background: #f6f8fa; cursor: pointer; }
+  button:disabled { opacity: 0.5; }
+  .status { margin-top: 8px; white-space: pre-wrap; color: #444; }
+  .ok { color: #08764f; }
+  .bad { color: #b42318; }
+</style>
+</head>
+<body>
+<h1>SAT2 Network-First Receive (3A Shadow)</h1>
+<div class="row">
+  <button id="attachAll">附着所有 ChatGPT 标签页</button>
+  <button id="detach" disabled>停止</button>
+</div>
+<div class="row">
+  <button id="mShort" disabled>标记: 普通短回复</button>
+  <button id="mLong" disabled>标记: 长回复</button>
+  <button id="mGit" disabled>标记: @GitHub</button>
+  <button id="mCap" disabled>标记: SAT2 Capsule</button>
+  <button id="mConc" disabled>标记: 并发</button>
+</div>
+<div class="row">
+  <button id="export" disabled>停止并导出 JSONL</button>
+  <button id="clear" disabled>清空</button>
+</div>
+<div id="status" class="status">未附着。</div>
+<div id="count" class="status"></div>
+<script src="popup.js"></script>
+</body>
+</html>
