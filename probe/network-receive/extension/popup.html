@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <style>
-  body { width: 330px; font-family: system-ui, sans-serif; font-size: 13px; margin: 0; padding: 12px; }
+  body { width: 360px; font-family: system-ui, sans-serif; font-size: 13px; margin: 0; padding: 12px; }
   h1 { font-size: 14px; margin: 0 0 8px; }
   .row { margin: 6px 0; display: flex; gap: 6px; flex-wrap: wrap; }
   button { padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; background: #f6f8fa; cursor: pointer; }
@@ -11,26 +11,24 @@
   .status { margin-top: 8px; white-space: pre-wrap; color: #444; }
   .ok { color: #08764f; }
   .bad { color: #b42318; }
-  ol { margin: 6px 0 0 18px; padding: 0; }
+  #tabs { margin-top: 8px; max-height: 180px; overflow: auto; border: 1px solid #ddd; border-radius: 6px; padding: 6px; }
+  #tabs label { display: block; margin: 4px 0; word-break: break-all; }
 </style>
 </head>
 <body>
 <h1>SAT2 Network-First Receive (3A Shadow)</h1>
 <div class="row">
-  <button id="attachAll">① 附着所有 ChatGPT 标签页</button>
+  <button id="refreshTabs">刷新标签页列表</button>
+  <button id="attachSel">附着选中的标签页</button>
   <button id="detach" disabled>停止</button>
 </div>
+<div id="tabs">点击「刷新标签页列表」查看可附着的 ChatGPT 标签页。</div>
 <div class="row">
-  <button id="export" disabled>② 停止并导出</button>
+  <button id="export" disabled>停止并导出</button>
   <button id="clear" disabled>清空</button>
 </div>
 <div id="status" class="status">未附着。</div>
 <div id="count" class="status"></div>
-<ol>
-  <li>点「① 附着所有 ChatGPT 标签页」</li>
-  <li>在测试会话里<b>连续发送消息</b>（短/长/@GitHub/含 Decision JSON 的都可以，数量自定，无需点任何按钮）</li>
-  <li>全部发完 → 点「② 停止并导出」</li>
-</ol>
 <script src="popup.js"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 // DOM shadow detector content script for the 3A receiver.
-// Scans the latest assistant message and reports its text and parsed decision.
+// Reports the latest assistant message text hash + parsed decision.
 (() => {
   if (globalThis.__SAT2_NR_DOM_SHADOW__) return;
   globalThis.__SAT2_NR_DOM_SHADOW__ = true;
@@ -22,16 +22,24 @@
     }
   }
 
+  async function sha256Hex(text) {
+    const bytes = new TextEncoder().encode(String(text || ""));
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type !== "NR_DOM_FIND") return false;
     const messages = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
     const last = messages[messages.length - 1];
     if (!last) {
-      sendResponse({decision: null, found: false});
+      sendResponse({decision: null, found: false, text_hash: null});
       return false;
     }
     const text = textOf(last);
-    sendResponse({decision: parseDecision(text), found: true, text_hash_pending: true});
-    return false;
+    sha256Hex(text).then((hash) => {
+      sendResponse({decision: parseDecision(text), found: true, text_hash: hash});
+    });
+    return true;
   });
 })();

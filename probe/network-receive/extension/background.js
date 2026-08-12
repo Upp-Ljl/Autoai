@@ -1,4 +1,4 @@
-// SAT2 Network-First Receive — Phase 3A SHADOW receiver.
+﻿// SAT2 Network-First Receive 鈥?Phase 3A SHADOW receiver.
 //
 // Network-first receive path (shadow):
 //   1. track POST /backend-api/f/conversation via CDP Network events
@@ -12,7 +12,7 @@
 //     turn attribution + semantic final assistant state + normal finish + no
 //     loadingFailed (WS conversation-update recorded as secondary confirmation)
 //   - response bodies are parsed in memory only; nothing persists raw SSE,
-//     cookies, authorization, or tokens — only hashes/enums/metadata
+//     cookies, authorization, or tokens 鈥?only hashes/enums/metadata
 //   - SHADOW: this extension never submits decisions to the daemon
 //   - read-only: getResponseBody on a *finished* request does not intercept,
 //     modify, or replay anything
@@ -99,20 +99,27 @@ function parseSse(body) {
 function extractAssistant(events) {
   // ChatGPT SSE typed events:
   //   message_marker           -> message_id attribution
-  //   <no type> token chunks   -> content delta in `c`
-  //   message_stream_complete  -> semantic terminal signal
+  //   <no type> token chunks   -> content delta in `v`
+  //   v = {error, error_code}  -> turn-level failure signal
+  //   message_stream_complete  -> stream ended (may follow an error!)
   let finalText = "";
   let messageId = null;
   let terminalStatus = null;
   let lastEventType = null;
+  let hasError = false;
+  let errorCode = null;
   for (const ev of events) {
     const type = typeof ev?.type === "string" ? ev.type : null;
     if (type) lastEventType = type;
     if (type === "message_marker" && ev.message_id && !messageId) messageId = ev.message_id;
     if (type === "message_stream_complete") terminalStatus = "message_stream_complete";
     if (!type && ev && typeof ev === "object") {
-      // content delta lives in `v` (c is a numeric content index)
       const v = ev.v;
+      if (v && typeof v === "object" && (v.error !== undefined || v.error_code !== undefined)) {
+        hasError = true;
+        if (typeof v.error_code === "string") errorCode = v.error_code;
+        else if (typeof v.error === "string") errorCode = v.error;
+      }
       if (typeof v === "string") finalText += v;
       else if (Array.isArray(v)) {
         for (const item of v) {
@@ -122,13 +129,10 @@ function extractAssistant(events) {
             else if (typeof item.content === "string") finalText += item.content;
           }
         }
-      } else if (v && typeof v === "object") {
-        if (typeof v.content === "string") finalText += v.content;
-        else if (typeof v.text === "string") finalText += v.text;
       }
     }
   }
-  return {finalText, messageId, terminalStatus, lastEventType};
+  return {finalText, messageId, terminalStatus, lastEventType, hasError, errorCode};
 }
 
 function parseDecision(text) {
@@ -325,10 +329,12 @@ async function handleFinished(tabId, requestId, turn) {
     turn.sse &&
     turn.status === 200 &&
     hasSemanticFinal &&
+    !assistant?.hasError &&
     turn.finished != null
   );
 
-  // 4. DOM shadow comparison
+  // 4. DOM shadow comparison (only on the same tab; text-hash comparison for
+  //    plain replies, decision comparison when a Decision is present)
   const domResult = await domDetect(tabId, null);
   const domDecision = domResult?.decision
     ? {
@@ -338,16 +344,23 @@ async function handleFinished(tabId, requestId, turn) {
       }
     : null;
 
-  const agreement =
-    domResult?.decision && decision
-      ? {
-          decision_match: domResult.decision.decision === decision.decision,
-          summary_hash_match: domResult.decision.summary === decision.summary_hash
-            ? undefined
-            : await sha256Text(domResult.decision.summary) === decision.summary_hash,
-          token_match: domResult.decision.delivery_token === decision.delivery_token,
-        }
-      : null;
+  const transportTextHash = assistant?.finalText
+    ? await sha256Text(assistant.finalText)
+    : null;
+  const domTextHash = domResult?.text_hash || null;
+
+  const agreement = {
+    text_hash_match:
+      transportTextHash && domTextHash ? transportTextHash === domTextHash : null,
+    decision_match:
+      domResult?.decision && decision
+        ? domResult.decision.decision === decision.decision
+        : null,
+    token_match:
+      domResult?.decision && decision
+        ? domResult.decision.delivery_token === decision.delivery_token
+        : null,
+  };
 
   await push("turn_complete", {
     tab_id: tabId,
@@ -356,7 +369,10 @@ async function handleFinished(tabId, requestId, turn) {
     conv_url_hash: turn.convUrl ? hashOf(turn.convUrl) : null,
     message_id_hash: assistant?.messageId ? hashOf(assistant.messageId) : null,
     terminal_status: assistant?.terminalStatus,
+    has_error: assistant?.hasError || false,
+    error_code: assistant?.errorCode || null,
     last_event_type: assistant?.lastEventType,
+    final_text_hash: transportTextHash,
     sse_events: sseEvents,
     sse_structure: body && turn.sse ? sseStructure(parseSse(body)) : null,
     sse_bytes: body ? new TextEncoder().encode(body).length : 0,
@@ -365,6 +381,7 @@ async function handleFinished(tabId, requestId, turn) {
     body_error: bodyError,
     decision_transport: decision,
     decision_dom: domDecision,
+    dom_text_hash: domTextHash,
     agreement,
     encoded_data_length: turn.finished,
   });
@@ -455,3 +472,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   });
   return true;
 });
+

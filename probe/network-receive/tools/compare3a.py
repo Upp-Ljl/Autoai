@@ -78,11 +78,18 @@ def main() -> int:
     for r in completed:
         case = r.get("_class") or "unmarked"
         c = per_case.setdefault(
-            case, {"turns": 0, "transport_completed": 0, "decision_both": 0, "match": 0, "mismatch": 0, "errors": 0}
+            case, {"turns": 0, "transport_completed": 0, "text_hash_compared": 0, "text_hash_match": 0, "decision_both": 0, "match": 0, "mismatch": 0, "errors": 0, "error_turns": 0}
         )
         c["turns"] += 1
         if r.get("transport_completed"):
             c["transport_completed"] += 1
+        if r.get("has_error"):
+            c["error_turns"] += 1
+        ag = r.get("agreement") or {}
+        if ag.get("text_hash_match") is not None:
+            c["text_hash_compared"] += 1
+            if ag["text_hash_match"]:
+                c["text_hash_match"] += 1
         t = r.get("decision_transport")
         d = r.get("decision_dom")
         if t and d:
@@ -98,15 +105,21 @@ def main() -> int:
     total = len(completed)
     both = sum(c["decision_both"] for c in per_case.values())
     match = sum(c["match"] for c in per_case.values())
+    text_compared = sum(c["text_hash_compared"] for c in per_case.values())
+    text_match = sum(c["text_hash_match"] for c in per_case.values())
     report["summary"] = {
         "turns": total,
         "transport_completed": sum(c["transport_completed"] for c in per_case.values()),
+        "error_turns": sum(c["error_turns"] for c in per_case.values()),
+        "text_hash_compared": text_compared,
+        "text_hash_match": text_match,
+        "text_consistency_pct": (100.0 * text_match / text_compared) if text_compared else None,
         "decision_both": both,
         "match": match,
         "mismatch": sum(c["mismatch"] for c in per_case.values()),
-        "consistency_pct": (100.0 * match / both) if both else None,
+        "decision_consistency_pct": (100.0 * match / both) if both else None,
         "errors": sum(c["errors"] for c in per_case.values()),
-        "pass_criteria": both > 0 and match == both,
+        "pass_criteria": text_compared > 0 and text_match == text_compared,
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
