@@ -258,6 +258,19 @@ function onDebuggerEvent(source, method, params) {
   }
 }
 
+function sseStructure(events) {
+  // structural skeleton only (types + top-level keys), no content
+  return events.slice(0, 40).map((ev) => ({
+    type: typeof ev?.type === "string" ? ev.type : null,
+    keys: ev && typeof ev === "object" ? Object.keys(ev).sort() : [],
+    message_keys: ev?.message && typeof ev.message === "object" ? Object.keys(ev.message).sort() : null,
+    has_content: Boolean(ev?.message?.content),
+    msg_role: ev?.message?.author?.role || null,
+    msg_status: ev?.message?.status || null,
+    msg_id: Boolean(ev?.message?.id),
+  }));
+}
+
 async function handleFinished(tabId, requestId, turn) {
   // 1. read the completed SSE body in memory (read-only, after finish)
   let body = null;
@@ -328,6 +341,7 @@ async function handleFinished(tabId, requestId, turn) {
     terminal_status: assistant?.terminalStatus,
     last_event_type: assistant?.lastEventType,
     sse_events: sseEvents,
+    sse_structure: body && turn.sse ? sseStructure(parseSse(body)) : null,
     sse_bytes: body ? new TextEncoder().encode(body).length : 0,
     sse_sha256: body ? sha256Text(body) : null,
     transport_completed: completed,
