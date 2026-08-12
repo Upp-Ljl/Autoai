@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SHA_PATTERN = r"^[0-9a-f]{40}$"
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
 KNOWN_ROLES = {"mentor", "S1", "S2", "S3", "S4", "user", "relay"}
+SESSION_ROLES = {"mentor", "S1", "S2", "S3", "S4"}
 
 
 class RelayMode(StrEnum):
@@ -17,6 +18,12 @@ class RelayMode(StrEnum):
     DRY_RUN = "dry_run"
     ACTIVE = "active"
     PAUSED = "paused"
+
+
+class RouteSignalMode(StrEnum):
+    COMMENT = "comment"
+    PROGRESS_SHADOW = "progress_shadow"
+    PROGRESS = "progress"
 
 
 class EventType(StrEnum):
@@ -37,6 +44,20 @@ class DecisionName(StrEnum):
     MENTOR_CHANGES_REQUIRED = "MENTOR_CHANGES_REQUIRED"
     MENTOR_ACCEPTED = "MENTOR_ACCEPTED"
     TASK_BLOCKED = "TASK_BLOCKED"
+
+
+def normalize_session_role(value: str) -> str:
+    lowered = value.strip().lower()
+    aliases = {
+        "mentor": "mentor",
+        "s1": "S1",
+        "s2": "S2",
+        "s3": "S3",
+        "s4": "S4",
+        "user": "user",
+        "relay": "relay",
+    }
+    return aliases.get(lowered, value.strip())
 
 
 class RelayEvent(BaseModel):
@@ -60,7 +81,7 @@ class RelayEvent(BaseModel):
     task_spec_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     attempt: int = Field(default=1, ge=1, le=1000)
     next_actor: str | None = Field(default=None, max_length=40)
-    next_task: str | None = Field(default=None, max_length=160)
+    next_task: str | None = Field(default=None, max_length=240)
     timestamp: datetime
     summary: str | None = Field(default=None, max_length=8000)
     source_comment_id: int | None = None
@@ -72,17 +93,7 @@ class RelayEvent(BaseModel):
     def normalize_role(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        lowered = value.strip().lower()
-        aliases = {
-            "mentor": "mentor",
-            "s1": "S1",
-            "s2": "S2",
-            "s3": "S3",
-            "s4": "S4",
-            "user": "user",
-            "relay": "relay",
-        }
-        normalized = aliases.get(lowered, value.strip())
+        normalized = normalize_session_role(value)
         if normalized not in KNOWN_ROLES:
             raise ValueError(f"unknown role: {value}")
         return normalized
@@ -150,10 +161,8 @@ class DecisionSubmission(BaseModel):
     @field_validator("role")
     @classmethod
     def normalize_submission_role(cls, value: str) -> str:
-        lowered = value.strip().lower()
-        aliases = {"mentor": "mentor", "s1": "S1", "s2": "S2", "s3": "S3", "s4": "S4"}
-        normalized = aliases.get(lowered, value.strip())
-        if normalized not in {"mentor", "S1", "S2", "S3", "S4"}:
+        normalized = normalize_session_role(value)
+        if normalized not in SESSION_ROLES:
             raise ValueError(f"unsupported endpoint role: {value}")
         return normalized
 
@@ -209,6 +218,11 @@ class RepoMonitor(BaseModel):
     pr_number: int = Field(gt=0)
     task_id: str
     worker_role: str
+    mentor_role: str = "mentor"
+    route_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]+$")
+    signal_mode: RouteSignalMode = RouteSignalMode.COMMENT
+    progress_file: str | None = None
+    progress_ref: str | None = None
     enabled: bool = True
     required_apps: list[str] = Field(default_factory=lambda: ["GitHub"])
     strict_apps: bool = False
@@ -223,9 +237,17 @@ class RepoMonitor(BaseModel):
     @field_validator("worker_role")
     @classmethod
     def validate_worker_role(cls, value: str) -> str:
-        normalized = value.strip().upper()
+        normalized = normalize_session_role(value)
         if normalized not in {"S1", "S2", "S3", "S4"}:
             raise ValueError("worker_role must be S1, S2, S3, or S4")
+        return normalized
+
+    @field_validator("mentor_role")
+    @classmethod
+    def validate_mentor_role(cls, value: str) -> str:
+        normalized = normalize_session_role(value)
+        if normalized not in SESSION_ROLES:
+            raise ValueError("mentor_role must be mentor, S1, S2, S3, or S4")
         return normalized
 
     @field_validator("task_ref")
@@ -237,6 +259,65 @@ class RepoMonitor(BaseModel):
         if value.startswith("@") and value not in {"@config", "@default", "@pr-head", "@pr-base"}:
             raise ValueError("task_ref special value must be @config, @default, @pr-head, or @pr-base")
         return value
+
+    @model_validator(mode="after")
+    def validate_role_pair(self) -> "RepoMonitor":
+        if self.mentor_role == self.worker_role:
+            raise ValueError("mentor_role and worker_role must be different")
+        if self.signal_mode is not RouteSignalMode.COMMENT:
+            if not self.route_id or not self.progress_file or not self.progress_ref:
+                raise ValueError("progress-driven monitor requires route_id, progress_file and progress_ref")
+        return self
+
+
+class RepoRoute(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route_id: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
+    mentor_role: str
+    worker_role: str
+    pr_number: int = Field(gt=0)
+    progress_file: str = Field(min_length=1, max_length=320)
+    progress_ref: str = Field(min_length=1, max_length=160)
+    task_root: str = Field(min_length=1, max_length=240)
+    bootstrap_task_file: str | None = Field(default=None, max_length=320)
+    task_ref: str | None = Field(default=None, max_length=160)
+    signal_mode: RouteSignalMode = RouteSignalMode.PROGRESS_SHADOW
+    enabled: bool = True
+    required_apps: list[str] = Field(default_factory=lambda: ["GitHub"])
+    strict_apps: bool = False
+
+    @field_validator("mentor_role", "worker_role")
+    @classmethod
+    def validate_route_role(cls, value: str) -> str:
+        normalized = normalize_session_role(value)
+        if normalized not in SESSION_ROLES:
+            raise ValueError("route roles must be mentor, S1, S2, S3, or S4")
+        return normalized
+
+    @field_validator("progress_file", "task_root", "bootstrap_task_file")
+    @classmethod
+    def normalize_repo_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        path = value.strip().replace("\\", "/").lstrip("/")
+        parts = [part for part in path.split("/") if part]
+        if not parts or any(part in {".", ".."} for part in parts):
+            raise ValueError("route repository paths must be normalized relative paths")
+        return "/".join(parts)
+
+    @model_validator(mode="after")
+    def validate_route(self) -> "RepoRoute":
+        if self.mentor_role == self.worker_role:
+            raise ValueError("route mentor_role and worker_role must be different")
+        root = self.task_root.rstrip("/")
+        if self.bootstrap_task_file and not (
+            self.bootstrap_task_file == root or self.bootstrap_task_file.startswith(root + "/")
+        ):
+            raise ValueError("bootstrap_task_file must be inside task_root")
+        if self.signal_mode is RouteSignalMode.PROGRESS and self.progress_ref in {"@default", "@pr-head", "@pr-base"}:
+            raise ValueError("active progress routes require a stable explicit control ref or @config")
+        return self
 
 
 class RepoRelayConfig(BaseModel):
@@ -258,6 +339,7 @@ class RepoRelayConfig(BaseModel):
     extension_stale_seconds: int = Field(default=90, ge=30, le=86400)
     process_existing_events_on_first_poll: bool = False
     monitors: list[RepoMonitor] = Field(default_factory=list)
+    routes: list[RepoRoute] = Field(default_factory=list)
     human_gates: list[str] = Field(default_factory=lambda: [
         "merge",
         "mark_ready_for_review",
@@ -298,6 +380,35 @@ class RepoRelayConfig(BaseModel):
                 raise ValueError(f"enabled monitor {monitor.task_id} requires task_file")
             if monitor.enabled and not monitor.allowed_paths:
                 raise ValueError(f"enabled monitor {monitor.task_id} requires allowed_paths")
+
+        route_ids: set[str] = set()
+        active_roles: set[str] = set()
+        active_progress_refs: set[str] = set()
+        active_prs: set[int] = set()
+        task_roots: list[tuple[str, str]] = []
+        for route in self.routes:
+            if route.route_id in route_ids:
+                raise ValueError(f"duplicate route_id {route.route_id}")
+            route_ids.add(route.route_id)
+            if not route.enabled:
+                continue
+            for role in (route.mentor_role, route.worker_role):
+                if role in active_roles:
+                    raise ValueError(f"parallel routes must not share Session role {role}")
+                active_roles.add(role)
+            if route.signal_mode is RouteSignalMode.PROGRESS:
+                if route.progress_ref in active_progress_refs:
+                    raise ValueError("active progress routes require distinct control refs")
+                active_progress_refs.add(route.progress_ref)
+                if route.pr_number in active_prs:
+                    raise ValueError("active progress routes require distinct scientific PRs")
+                active_prs.add(route.pr_number)
+                root = route.task_root.rstrip("/")
+                for other_id, other_root in task_roots:
+                    if root == other_root or root.startswith(other_root + "/") or other_root.startswith(root + "/"):
+                        raise ValueError(f"route task_root overlap: {route.route_id} and {other_id}")
+                task_roots.append((route.route_id, root))
+
         if self.enabled and not self.trusted_actors:
             raise ValueError("enabled Relay requires at least one trusted actor")
         return self

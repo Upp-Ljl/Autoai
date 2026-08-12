@@ -6,6 +6,7 @@ from typing import Any
 
 import yaml
 
+from .autonomy import ParallelAutonomyController, ProgressError
 from .db import RelayDB
 from .github import GitHubError
 from .models import (
@@ -69,6 +70,10 @@ class DecisionEngine:
     def _config(self):
         return self.service.refresh_config()
 
+    @property
+    def autonomy(self) -> ParallelAutonomyController:
+        return ParallelAutonomyController(self.service, self.db)
+
     @staticmethod
     def _head(pr: dict[str, Any]) -> str:
         return str((pr.get("head") or {}).get("sha") or "")
@@ -78,11 +83,10 @@ class DecisionEngine:
         return str((pr.get("base") or {}).get("sha") or "")
 
     def _monitor(self, task_id: str) -> RepoMonitor:
-        config = self.service.repo_config or self._config()
-        for monitor in config.monitors:
-            if monitor.task_id == task_id and monitor.enabled:
-                return monitor
-        raise DecisionError("TASK_NOT_MONITORED", f"No enabled monitor exists for task {task_id}")
+        monitor = self.autonomy.monitor_for_task(task_id)
+        if monitor:
+            return monitor
+        raise DecisionError("TASK_NOT_MONITORED", f"No enabled or runtime monitor exists for task {task_id}")
 
     def _endpoint(self, submission: DecisionSubmission) -> dict[str, Any]:
         config = self.service.repo_config or self._config()
@@ -94,10 +98,18 @@ class DecisionEngine:
         return endpoint
 
     @staticmethod
-    def _validate_role_decision(role: str, decision: DecisionName) -> None:
+    def _validate_role_decision(monitor: RepoMonitor, role: str, decision: DecisionName) -> None:
         worker_allowed = {DecisionName.WORKER_ACK, DecisionName.WORKER_CHECKPOINT, DecisionName.TASK_BLOCKED}
         mentor_allowed = {DecisionName.MENTOR_CHANGES_REQUIRED, DecisionName.MENTOR_ACCEPTED, DecisionName.TASK_BLOCKED}
-        allowed = mentor_allowed if role == "mentor" else worker_allowed
+        if role == monitor.mentor_role:
+            allowed = mentor_allowed
+        elif role == monitor.worker_role:
+            allowed = worker_allowed
+        else:
+            raise DecisionError(
+                "ROLE_DECISION_MISMATCH",
+                f"Role {role} is outside task route roles mentor={monitor.mentor_role}, worker={monitor.worker_role}",
+            )
         if decision not in allowed:
             raise DecisionError("ROLE_DECISION_MISMATCH", f"Role {role} cannot submit {decision.value}")
 
@@ -114,10 +126,15 @@ class DecisionEngine:
             raise DecisionError("ILLEGAL_STATE_TRANSITION", f"State {state!r} does not allow {decision.value}")
 
     @staticmethod
-    def _validate_delivery_origin(role: str, decision: DecisionName, event_type: str) -> None:
-        if role == "mentor" and event_type != EventType.WORKER_CHECKPOINT.value:
+    def _validate_delivery_origin(
+        monitor: RepoMonitor,
+        role: str,
+        decision: DecisionName,
+        event_type: str,
+    ) -> None:
+        if role == monitor.mentor_role and event_type != EventType.WORKER_CHECKPOINT.value:
             raise DecisionError("DELIVERY_CAUSATION_MISMATCH", "Mentor decisions require a Worker checkpoint Capsule")
-        if role != "mentor" and event_type not in {
+        if role == monitor.worker_role and event_type not in {
             EventType.TASK_AUTHORIZED.value,
             EventType.MENTOR_CHANGES_REQUIRED.value,
         }:
@@ -155,7 +172,9 @@ class DecisionEngine:
             "repository": self.service.repo_config.repository,
             "task_id": monitor.task_id,
             "actor_role": submission.role,
-            "target_role": resolve_target(RelayEvent.model_construct(event_type=event_type), monitor),
+            "target_role": resolve_target(
+                RelayEvent.model_construct(event_type=event_type, actor_role=submission.role), monitor
+            ),
             "pr_number": monitor.pr_number,
             "parent_event_id": parent_event_id,
             "correlation_id": correlation,
@@ -196,7 +215,6 @@ class DecisionEngine:
 
     def submit(self, submission: DecisionSubmission) -> dict[str, Any]:
         config = self._config()
-        self._validate_role_decision(submission.role, submission.decision)
         self._endpoint(submission)
         context = self.db.delivery_context(submission.delivery_id)
         if not context:
@@ -207,6 +225,12 @@ class DecisionEngine:
             raise DecisionError("DELIVERY_TOKEN_MISMATCH", "Decision token does not match the active Capsule")
         if str(context.get("target_role") or "") != submission.role:
             raise DecisionError("ROLE_DELIVERY_MISMATCH", "Decision role does not match the delivery target")
+
+        task_id = str(context["task_id"])
+        monitor = self._monitor(task_id)
+        self._validate_role_decision(monitor, submission.role, submission.decision)
+        self._validate_delivery_origin(monitor, submission.role, submission.decision, str(context.get("event_type") or ""))
+
         duplicate = self.db.decision_exists_for_message(
             submission.delivery_id, submission.assistant_message_hash, submission.decision.value
         )
@@ -214,7 +238,6 @@ class DecisionEngine:
             return {"ok": True, "duplicate": True, "outbox": dict(duplicate)}
         if context.get("decision_consumed_at") and submission.decision is not DecisionName.WORKER_ACK:
             raise DecisionError("DELIVERY_ALREADY_CONSUMED", "The active Capsule already produced a terminal decision")
-        self._validate_delivery_origin(submission.role, submission.decision, str(context.get("event_type") or ""))
         if submission.decision is DecisionName.WORKER_ACK and self.db.ack_exists_for_delivery(submission.delivery_id):
             existing = self.db.decision_exists_for_message(
                 submission.delivery_id, submission.assistant_message_hash, submission.decision.value
@@ -225,10 +248,12 @@ class DecisionEngine:
         # WORKER_ACK is legacy/informational only. A checkpoint never waits for
         # an ACK; the confirmed delivery marker already proves receipt.
 
-        task_id = str(context["task_id"])
-        monitor = self._monitor(task_id)
-        if submission.role != "mentor" and submission.role != monitor.worker_role:
-            raise DecisionError("ROLE_DECISION_MISMATCH", f"Task {task_id} is assigned to {monitor.worker_role}, not {submission.role}")
+        if self.autonomy.is_progress_monitor(monitor):
+            try:
+                return self.autonomy.submit_decision(submission, context, monitor)
+            except ProgressError as exc:
+                raise DecisionError(exc.code, exc.detail) from exc
+
         pr = self.service.github.get_pull_request(config.repository, monitor.pr_number)
         if pr.get("state") != "open":
             raise DecisionError("PR_NOT_OPEN", f"PR #{monitor.pr_number} is {pr.get('state')}")
@@ -297,7 +322,7 @@ class DecisionEngine:
         if row["status"] == OutboxStatus.PUBLISHED.value:
             return row
         if row["status"] == OutboxStatus.WAITING_FOR_HUMAN.value:
-            raise DecisionError("WAITING_FOR_HUMAN", "Legacy outbox is waiting for local confirmation")
+            raise DecisionError("WAITING_FOR_HUMAN", "Legacy outbox is waiting for human confirmation")
         if not self.service.local.allow_github_writes:
             self.db.mark_outbox_error(
                 outbox_id, OutboxStatus.BLOCKED, "GITHUB_WRITES_DISABLED", "github.allow_writes is false"
@@ -347,6 +372,8 @@ class DecisionEngine:
                     counts["blocked"] += 1
                 else:
                     counts["retry"] += 1
+        route_counts = self.autonomy.poll_routes()
+        counts.update(route_counts)
         return counts
 
     def confirm(self, outbox_id: int) -> dict[str, Any]:
@@ -413,7 +440,7 @@ class DecisionEngine:
                 "event_type": EventType.TASK_AUTHORIZED.value,
                 "repository": config.repository,
                 "task_id": task_id,
-                "actor_role": "mentor",
+                "actor_role": monitor.mentor_role,
                 "target_role": monitor.worker_role,
                 "pr_number": monitor.pr_number,
                 "base_sha": base,
@@ -440,6 +467,7 @@ class DecisionEngine:
             "base_sha": base,
             "head_sha": head,
             "worker_role": monitor.worker_role,
+            "mentor_role": monitor.mentor_role,
             "task_spec": monitor.task_file,
             "task_spec_sha256": task_spec.sha256,
             "event": event.model_dump(mode="json", exclude_none=True),
@@ -458,7 +486,7 @@ class DecisionEngine:
             decision_key=str(preview["decision_key"]),
             delivery_id=None,
             task_id=task_id,
-            actor_role="mentor",
+            actor_role=str(preview.get("mentor_role") or "mentor"),
             conversation_key=None,
             assistant_message_id=None,
             assistant_message_hash=None,

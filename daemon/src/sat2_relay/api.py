@@ -72,7 +72,17 @@ def create_app(local: LocalConfig, db: RelayDB, service: RelayService, poll_enab
                 result = await run_poll()
                 config = service.repo_config
                 interval = config.poll_interval_seconds if config else 15
-                LOG.info("poll complete %s", result, extra={"stage": "poll"})
+                route_counts = {"routes": 0, "route_errors": 0, "route_bootstraps": 0}
+                try:
+                    route_counts = decision_engine.autonomy.poll_routes()
+                except Exception:  # noqa: BLE001
+                    route_counts = {"routes": 0, "route_errors": 0, "route_bootstraps": 0}
+                LOG.info(
+                    "poll complete %s route_counts=%s",
+                    result,
+                    route_counts,
+                    extra={"stage": "poll"},
+                )
             except Exception as exc:  # noqa: BLE001
                 LOG.exception("poll loop failed: %s", exc, extra={"stage": "poll"})
                 db.set_meta("last_poll_error", str(exc))

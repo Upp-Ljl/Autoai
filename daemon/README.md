@@ -39,3 +39,22 @@ The endpoint requires the local API token and excludes GitHub secrets, the local
 ## Optional MCP
 
 See the suite-level `MCP_SETUP.md`. The MCP server is stdio-only and forwards a bounded set of authenticated requests to the loopback daemon.
+
+## Deploying a new daemon version (parallel autonomy)
+
+The installed venv keeps its own copy of the package under
+`%LOCALAPPDATA%\SAT2Relay\venv\Lib\site-packages\sat2_relay`.  After merging
+changes from the repository:
+
+```powershell
+# 1. backup the running copy
+Copy-Item "$env:LOCALAPPDATA\SAT2Relay\venv\Lib\site-packages\sat2_relay" "$env:LOCALAPPDATA\SAT2Relay\venv\Lib\site-packages\sat2_relay.bak" -Recurse -Force
+# 2. copy the new sources (src layout) over the installed copy
+Copy-Item "daemon\src\sat2_relay\*.py" "$env:LOCALAPPDATA\SAT2Relay\venv\Lib\site-packages\sat2_relay\" -Force
+Copy-Item "daemon\src\sat2_relay\relay-event-v2.schema.json" "$env:LOCALAPPDATA\SAT2Relay\venv\Lib\site-packages\sat2_relay\" -Force
+# 3. restart
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts\windows\STOP_RELAY.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts\windows\START_OR_REPAIR.ps1"
+```
+
+Alternatively reinstall from source with `pip install --force-reinstall --no-build-isolation .` inside `daemon/` (requires setuptools in the target env).  New source files (e.g. `autonomy.py`) must be copied explicitly ¡ª they are not present in older installed copies.
