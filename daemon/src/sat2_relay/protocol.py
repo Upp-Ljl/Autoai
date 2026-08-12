@@ -9,7 +9,7 @@ from typing import Any
 import jsonschema
 import yaml
 
-from .models import EventType, RelayEvent, RepoMonitor
+from .models import EventType, RelayEvent, RepoMonitor, RouteSignalMode
 
 
 # A delivered Capsule may retain its delivery marker immediately before the
@@ -59,8 +59,17 @@ def validate_actor_semantics(event: RelayEvent, monitor: RepoMonitor) -> None:
     mentor_events = {EventType.TASK_AUTHORIZED, EventType.MENTOR_CHANGES_REQUIRED, EventType.MENTOR_ACCEPTED}
     if event.event_type in worker_events and event.actor_role != monitor.worker_role:
         raise ValueError(f"worker event actor {event.actor_role} does not match monitor worker {monitor.worker_role}")
-    if event.event_type in mentor_events and event.actor_role not in {"mentor", "user"}:
-        raise ValueError(f"mentor event cannot be emitted by role {event.actor_role}")
+    if event.event_type in mentor_events and event.actor_role not in {monitor.mentor_role, "user"}:
+        raise ValueError(
+            f"mentor event actor {event.actor_role} does not match monitor mentor {monitor.mentor_role}"
+        )
+    if event.event_type is EventType.TASK_BLOCKED and event.actor_role not in {
+        monitor.mentor_role,
+        monitor.worker_role,
+    }:
+        raise ValueError(
+            f"blocked event actor {event.actor_role} is outside route roles {monitor.mentor_role}/{monitor.worker_role}"
+        )
     if event.event_type is EventType.RELAY_ALERT and event.actor_role != "relay":
         raise ValueError("SAT2_RELAY_ALERT must use actor_role relay")
     if event.target_role:
@@ -89,8 +98,12 @@ def validate_pr_binding(event: RelayEvent, pr: dict[str, Any], pr_commit_shas: s
 
 
 def resolve_target(event: RelayEvent, monitor: RepoMonitor | None) -> str | None:
-    if event.event_type in {EventType.WORKER_ACK, EventType.WORKER_CHECKPOINT, EventType.TASK_BLOCKED}:
-        return "mentor"
+    if event.event_type in {EventType.WORKER_ACK, EventType.WORKER_CHECKPOINT}:
+        return monitor.mentor_role if monitor else "mentor"
+    if event.event_type is EventType.TASK_BLOCKED:
+        if monitor and event.actor_role == monitor.worker_role:
+            return monitor.mentor_role
+        return None
     if event.event_type in {EventType.TASK_AUTHORIZED, EventType.MENTOR_CHANGES_REQUIRED, EventType.MENTOR_ACCEPTED}:
         return monitor.worker_role if monitor else event.next_actor
     return None
@@ -135,8 +148,9 @@ def delivery_marker(event: RelayEvent, target_role: str) -> str:
     return f"{event.event_id}:{target_role}"
 
 
-def _decision_options(event: RelayEvent, target_role: str) -> list[str]:
-    if target_role == "mentor":
+def _decision_options(event: RelayEvent, target_role: str, monitor: RepoMonitor | None = None) -> list[str]:
+    mentor_role = monitor.mentor_role if monitor else "mentor"
+    if target_role == mentor_role:
         if event.event_type is EventType.WORKER_ACK:
             return []
         return ["MENTOR_CHANGES_REQUIRED", "MENTOR_ACCEPTED", "TASK_BLOCKED"]
@@ -148,11 +162,17 @@ def _decision_options(event: RelayEvent, target_role: str) -> list[str]:
     return []
 
 
-def _decision_template(event: RelayEvent, target_role: str, delivery_token: str) -> str:
-    options = _decision_options(event, target_role)
+def _decision_template(
+    event: RelayEvent,
+    target_role: str,
+    delivery_token: str,
+    monitor: RepoMonitor | None = None,
+) -> str:
+    options = _decision_options(event, target_role, monitor)
     if not options:
         return "This Capsule is informational. Do not emit a Relay Decision unless a later task Capsule requests one."
-    primary = "WORKER_CHECKPOINT" if target_role != "mentor" else "MENTOR_CHANGES_REQUIRED"
+    mentor_role = monitor.mentor_role if monitor else "mentor"
+    primary = "WORKER_CHECKPOINT" if target_role != mentor_role else "MENTOR_CHANGES_REQUIRED"
     return f"""When the current work or review reaches a control decision, finish the assistant response with exactly one visible marker and JSON object:
 
 SAT2_RELAY_DECISION
@@ -161,7 +181,7 @@ SAT2_RELAY_DECISION
 ```
 
 Allowed decision values for this Capsule: {", ".join(options)}.
-Do not write Relay YAML, task IDs, PR numbers, SHA values, actor roles, target roles, parent IDs, timestamps, or event IDs. The local Relay generates and validates all control fields."""
+Do not write Relay YAML, task IDs, PR numbers, SHA values, actor roles, target roles, parent IDs, timestamps, or event IDs into the Decision JSON. The local Relay generates and validates transport fields."""
 
 
 def _contract_lines(task_spec: dict[str, Any] | None) -> tuple[str, str, str, str]:
@@ -179,6 +199,31 @@ def _contract_lines(task_spec: dict[str, Any] | None) -> tuple[str, str, str, st
     )
 
 
+def _progress_contract(monitor: RepoMonitor | None, target_role: str) -> str:
+    if not monitor or monitor.signal_mode is RouteSignalMode.COMMENT:
+        return ""
+    mode = "SHADOW ONLY — keep emitting the normal Decision; Relay will compare but not route from progress." if monitor.signal_mode is RouteSignalMode.PROGRESS_SHADOW else "ACTIVE — the progress document plus this Session-bound Decision is the routing authority; no control comment is required."
+    actor = "Mentor" if target_role == monitor.mentor_role else "Worker"
+    return f"""
+PARALLEL ROUTE PROGRESS CONTRACT:
+- Route: {monitor.route_id}
+- Route role: {actor} ({target_role})
+- Mentor role: {monitor.mentor_role}
+- Worker role: {monitor.worker_role}
+- Progress file: {monitor.progress_file}
+- Progress ref: {monitor.progress_ref}
+- Signal mode: {monitor.signal_mode.value} ({mode})
+- Before emitting the final SAT2_RELAY_DECISION, update the route progress document on the exact progress ref in the same logical handoff as the scientific/task output.
+- Increment handoff_sequence by exactly 1 and set parent_sequence to the previous value. Never skip a sequence.
+- Set updated_by to exactly {target_role}, event_type to the same semantic decision, current_task/task_id to this task, pr_number to this PR, control_head_sha to the freshly read scientific PR head, and task_contract_sha256 to the frozen contract hash.
+- WORKER_CHECKPOINT must set candidate_sha to the freshly read scientific PR head.
+- MENTOR_CHANGES_REQUIRED or MENTOR_ACCEPTED must set reviewed_sha to the checkpoint SHA being reviewed; the scientific PR head must still equal that SHA.
+- MENTOR_ACCEPTED must either declare a route-local next_task inside the configured task root, or set route_status: COMPLETE with next_task: null.
+- TASK_BLOCKED must set route_status: BLOCKED and does not authorize the Relay to guess a recovery action.
+- Never modify another route's progress ref, progress file, task root, or Session binding.
+"""
+
+
 def build_execution_capsule(
     event: RelayEvent,
     target_role: str,
@@ -190,7 +235,9 @@ def build_execution_capsule(
 ) -> str:
     sha = event.candidate_sha or event.reviewed_sha or event.authorized_sha or event.base_sha or "not supplied"
     required_apps = ", ".join(monitor.required_apps if monitor else ["GitHub"])
-    source_url = event.source_comment_url or f"GitHub PR #{event.pr_number}"
+    source_url = event.source_comment_url or (
+        f"progress://{monitor.route_id}/{monitor.progress_file}" if monitor and monitor.route_id else f"GitHub PR #{event.pr_number}"
+    )
     task_ref = monitor.task_ref if monitor else "@config"
     action = {
         EventType.TASK_AUTHORIZED: "The Mentor-authored task specification is complete and executable. Read it at the exact task reference, verify the current PR/SHA, then perform the bounded task without waiting for another authorization message.",
@@ -200,8 +247,9 @@ def build_execution_capsule(
         EventType.MENTOR_ACCEPTED: "The Mentor accepted the candidate against the frozen task contract. This task is complete; Relay will discover any dependent executable task document automatically.",
     }.get(event.event_type, "Read the source event and act only within the SAT2 control protocol.")
     summary = event.summary or "No additional summary supplied; the task specification, PR, and exact SHA are authoritative."
-    decision_template = _decision_template(event, target_role, delivery_token)
+    decision_template = _decision_template(event, target_role, delivery_token, monitor)
     purpose, acceptance, required_reading, human_gates = _contract_lines(task_spec)
+    progress_contract = _progress_contract(monitor, target_role)
     return f"""@GitHub
 SAT2 Guided Execution Capsule 2.2
 
@@ -242,9 +290,9 @@ Mandatory controls:
 2. Read every document required by the task specification before making a scientific/source decision. The acceptance criteria above are a transport snapshot, not a substitute for reading the task file.
 3. A Worker checkpoint means the Worker asserts that the current candidate satisfies every task acceptance criterion that is applicable at this stage. Mentor must independently verify those criteria before accepting.
 4. Do not merge, mark ready, dispatch workflows, run qualification/formal experiments, change registry/seeds/evidence/paper, force-push, retarget the base, or expand scope unless the task document explicitly places that action outside a human gate.
-5. Session output contains business/scientific judgment only. The extension and local Relay own routing, SHA/parent binding and control-event publication.
+5. Session output contains business/scientific judgment only. The extension and local Relay own routing, SHA/parent binding and transport-event publication.
 6. The delivery token is scoped to this Capsule, role and conversation. Never reuse a token from another response.
-7. If the task contract, PR head, role binding or required evidence is inconsistent, emit TASK_BLOCKED rather than guessing or silently weakening an acceptance criterion.
-
+7. If the task contract, PR head, role binding, route progress contract or required evidence is inconsistent, emit TASK_BLOCKED rather than guessing or silently weakening an acceptance criterion.
+{progress_contract}
 {decision_template}
 """
