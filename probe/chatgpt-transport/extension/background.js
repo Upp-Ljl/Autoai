@@ -232,6 +232,30 @@ chrome.debugger.onDetach.addListener((source) => {
   }
 });
 
+function bytesToBase64(bytes) {
+  // Chunked conversion avoids call-stack limits for large exports.
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function exportJsonl() {
+  await flush();
+  const key = PREFIX + "pending";
+  const stored = (await chrome.storage.local.get(key))[key] || [];
+  const rows = [...stored].sort((a, b) => (a.ts < b.ts ? -1 : 1));
+  const jsonl = rows.map((row) => JSON.stringify(row)).join("\n");
+  const blob = new Blob([jsonl], {type: "application/x-ndjson"});
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const dataUrl = "data:application/x-ndjson;base64," + bytesToBase64(bytes);
+  const filename = `chatgpt-transport-probe-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;
+  const id = await chrome.downloads.download({url: dataUrl, filename, saveAs: true});
+  return {ok: true, rows: rows.length, downloadId: id};
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     switch (message?.type) {
@@ -253,27 +277,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         };
       case "PROBE_COUNT":
         return {count: await recordCount()};
-      case "PROBE_EXPORT": {
-        await flush();
-        const key = PREFIX + "pending";
-        const stored = (await chrome.storage.local.get(key))[key] || [];
-        const rows = [...stored].sort((a, b) => (a.ts < b.ts ? -1 : 1));
-        const jsonl = rows.map((row) => JSON.stringify(row)).join("\n");
-        const blob = new Blob([jsonl], {type: "application/x-ndjson"});
-        const url = URL.createObjectURL(blob);
-        const filename = `chatgpt-transport-probe-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;
-        const id = await chrome.downloads.download({url, filename, saveAs: true});
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
-        return {ok: true, rows: rows.length, downloadId: id};
-      }
-      case "PROBE_CLEAR": {
+      case "PROBE_EXPORT":
+        return exportJsonl();
+      case "PROBE_CLEAR":
         await chrome.storage.local.remove(PREFIX + "pending");
         records = [];
         return {ok: true};
-      }
       default:
         return {ok: false, error: "unknown message"};
     }
-  })().then(sendResponse);
+  })().then(sendResponse, (error) => {
+    sendResponse({ok: false, error: error.message || String(error)});
+  });
   return true;
 });

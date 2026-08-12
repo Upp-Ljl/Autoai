@@ -64,13 +64,14 @@ $("mark2").addEventListener("click", async () => {
 });
 
 $("export").addEventListener("click", async () => {
+  $("status").textContent = "正在导出…（浏览器会提示保存 JSONL）";
   const result = await send({type: "PROBE_EXPORT"});
-  if (result.ok) {
-    $("status").textContent = `已导出 ${result.rows} 行记录（浏览器会提示保存 JSONL）。`;
+  if (result?.ok) {
+    $("status").textContent = `已导出 ${result.rows} 行记录。`;
     $("status").className = "status ok";
     setAttached(false);
   } else {
-    $("status").textContent = "导出失败: " + (result.error || "unknown");
+    $("status").textContent = "导出失败: " + ((result && result.error) || "unknown");
     $("status").className = "status bad";
   }
 });
