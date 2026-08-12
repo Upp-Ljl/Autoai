@@ -16,6 +16,7 @@ const MAX_RECORDS = 40000;
 
 let records = [];
 let attachedTabId = null;
+let attachedTabUrl = null;
 let activeCase = null; // 1 = plain text message, 2 = @GitHub message
 
 function iso() {
@@ -199,8 +200,14 @@ async function attach(tabId) {
     await chrome.debugger.attach({tabId}, "1.3");
     await chrome.debugger.sendCommand({tabId}, "Network.enable");
     attachedTabId = tabId;
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      attachedTabUrl = tab.url || null;
+    } catch {
+      attachedTabUrl = null;
+    }
     activeCase = null;
-    return {ok: true};
+    return {ok: true, tabUrl: attachedTabUrl};
   } catch (error) {
     return {ok: false, error: error.message || String(error)};
   }
@@ -212,13 +219,17 @@ async function detach() {
       await chrome.debugger.detach({tabId: attachedTabId});
     } catch {}
     attachedTabId = null;
+    attachedTabUrl = null;
   }
   await flush();
 }
 
 chrome.debugger.onEvent.addListener(onDebuggerEvent);
 chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId === attachedTabId) attachedTabId = null;
+  if (source.tabId === attachedTabId) {
+    attachedTabId = null;
+    attachedTabUrl = null;
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -233,6 +244,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         activeCase = message.case;
         records.push({ts: iso(), kind: "marker", case: activeCase, label: message.label});
         return {ok: true};
+      case "PROBE_STATUS":
+        return {
+          attached: attachedTabId !== null,
+          tabId: attachedTabId,
+          tabUrl: attachedTabUrl,
+          activeCase,
+        };
       case "PROBE_COUNT":
         return {count: await recordCount()};
       case "PROBE_EXPORT": {

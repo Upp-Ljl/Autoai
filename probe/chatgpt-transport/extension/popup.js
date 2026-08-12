@@ -6,7 +6,7 @@ async function send(message) {
   return chrome.runtime.sendMessage(message);
 }
 
-function setAttached(state) {
+function setAttached(state, url) {
   attached = state;
   $("attach").disabled = state;
   $("detach").disabled = !state;
@@ -15,9 +15,19 @@ function setAttached(state) {
   $("export").disabled = !state;
   $("clear").disabled = false;
   const el = $("status");
-  el.textContent = state ? "已附着，等待采集。" : "未附着。";
+  el.textContent = state
+    ? `已附着: ${url || "当前会话"}\n① 点「标记: 普通文本消息」→ 发一条普通消息\n② 点「标记: @GitHub 消息」→ 发一条 @GitHub 消息\n③ 「停止并导出 JSONL」`
+    : "未附着。请打开 ChatGPT 测试会话标签页并点「附着到当前标签页」。";
   el.className = "status";
 }
+
+// Restore real attach state when the popup opens (popup is a fresh page each time).
+(async function init() {
+  const status = await send({type: "PROBE_STATUS"});
+  if (status?.attached) {
+    setAttached(true, status.tabUrl || null);
+  }
+})();
 
 $("attach").addEventListener("click", async () => {
   const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
