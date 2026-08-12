@@ -113,7 +113,15 @@ function extractAssistant(events) {
     if (!type && ev && typeof ev === "object") {
       const c = ev.c;
       if (typeof c === "string") finalText += c;
-      else if (c && typeof c === "object") {
+      else if (Array.isArray(c)) {
+        for (const item of c) {
+          if (typeof item === "string") finalText += item;
+          else if (item && typeof item === "object") {
+            if (typeof item.text === "string") finalText += item.text;
+            else if (typeof item.content === "string") finalText += item.content;
+          }
+        }
+      } else if (c && typeof c === "object") {
         if (typeof c.content === "string") finalText += c.content;
         else if (typeof c.text === "string") finalText += c.text;
       }
@@ -255,15 +263,38 @@ function onDebuggerEvent(source, method, params) {
 
 function sseStructure(events) {
   // structural skeleton only (types + top-level keys), no content
-  return events.slice(0, 40).map((ev) => ({
-    type: typeof ev?.type === "string" ? ev.type : null,
-    keys: ev && typeof ev === "object" ? Object.keys(ev).sort() : [],
-    message_keys: ev?.message && typeof ev.message === "object" ? Object.keys(ev.message).sort() : null,
-    has_content: Boolean(ev?.message?.content),
-    msg_role: ev?.message?.author?.role || null,
-    msg_status: ev?.message?.status || null,
-    msg_id: Boolean(ev?.message?.id),
-  }));
+  return events.slice(0, 40).map((ev) => {
+    let c_schema = null;
+    const c = ev?.c;
+    if (c != null) {
+      if (typeof c === "string") c_schema = {type: "string", len: c.length};
+      else if (Array.isArray(c)) {
+        const first = c[0];
+        c_schema = {
+          type: "array",
+          len: c.length,
+          item: first == null ? null : typeof first === "string" ? {type: "string", len: first.length} : typeof first === "object" ? {type: "object", keys: Object.keys(first).sort()} : {type: typeof first},
+        };
+      } else if (typeof c === "object") {
+        c_schema = {
+          type: "object",
+          keys: Object.keys(c).sort(),
+          content_type: typeof c.content,
+          text_type: typeof c.text,
+        };
+      } else c_schema = {type: typeof c};
+    }
+    return {
+      type: typeof ev?.type === "string" ? ev.type : null,
+      keys: ev && typeof ev === "object" ? Object.keys(ev).sort() : [],
+      c_schema,
+      message_keys: ev?.message && typeof ev.message === "object" ? Object.keys(ev.message).sort() : null,
+      has_content: Boolean(ev?.message?.content),
+      msg_role: ev?.message?.author?.role || null,
+      msg_status: ev?.message?.status || null,
+      msg_id: Boolean(ev?.message?.id),
+    };
+  });
 }
 
 async function handleFinished(tabId, requestId, turn) {
