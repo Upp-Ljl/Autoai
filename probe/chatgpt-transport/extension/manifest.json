@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "SAT2 ChatGPT Web Transport Probe (read-only)",
+  "version": "0.1.0",
+  "description": "Read-only CDP Network probe for ChatGPT web transport metadata. Captures request/WebSocket metadata only; never intercepts, modifies, replays, or stores credentials/payload contents.",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SAT2 Transport Probe"
+  }
+}

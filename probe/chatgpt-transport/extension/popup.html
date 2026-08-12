@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 300px; font-family: system-ui, sans-serif; font-size: 13px; margin: 0; padding: 12px; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  .row { margin: 6px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  button { padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; background: #f6f8fa; cursor: pointer; }
+  button:disabled { opacity: 0.5; }
+  .status { margin-top: 8px; white-space: pre-wrap; color: #444; }
+  .ok { color: #08764f; }
+  .bad { color: #b42318; }
+</style>
+</head>
+<body>
+<h1>SAT2 ChatGPT Transport Probe</h1>
+<div class="row">
+  <button id="attach">附着到当前标签页</button>
+  <button id="detach" disabled>停止</button>
+</div>
+<div class="row">
+  <button id="mark1" disabled>标记: 普通文本消息</button>
+  <button id="mark2" disabled>标记: @GitHub 消息</button>
+</div>
+<div class="row">
+  <button id="export" disabled>停止并导出 JSONL</button>
+  <button id="clear" disabled>清空记录</button>
+</div>
+<div id="status" class="status">未附着。请先打开 ChatGPT 测试会话标签页。</div>
+<div id="count" class="status"></div>
+<script src="popup.js"></script>
+</body>
+</html>
