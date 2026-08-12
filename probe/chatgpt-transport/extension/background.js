@@ -1,4 +1,4 @@
-// SAT2 ChatGPT Web Transport Probe — Phase 2 semantic correlation collector.
+﻿// SAT2 ChatGPT Web Transport Probe 鈥?Phase 2 semantic correlation collector.
 //
 // Read-only CDP Network collector. Captures transport METADATA plus, for
 // Phase 2, in-memory structural parsing of HTTP/WebSocket payloads:
@@ -97,8 +97,13 @@ function conversationHashFromUrl(rawUrl) {
   }
 }
 
-// document URL per network requestId (for WS frames to inherit conversation)
+// document URL per (tab, network requestId) 鈥?requestIds are per-target,
+// so they must be keyed together with the tab id to avoid cross-tab clashes.
 const docUrlByRequest = new Map();
+
+function docKey(tabId, requestId) {
+  return tabId + ":" + requestId;
+}
 
 async function semanticHttp(params) {
   const req = params.request || {};
@@ -222,7 +227,7 @@ function onDebuggerEvent(source, method, params) {
       const meta = urlMeta(req.url);
       const docHashPromise = conversationHashFromUrl(params.documentURL || "");
       void docHashPromise.then((h) => {
-        if (h) docUrlByRequest.set(params.requestId, h);
+        if (h) docUrlByRequest.set(docKey(source.tabId, params.requestId), h);
         if (docUrlByRequest.size > 500) {
           const first = docUrlByRequest.keys().next().value;
           docUrlByRequest.delete(first);
@@ -277,7 +282,7 @@ function onDebuggerEvent(source, method, params) {
         ws_request_id: params.requestId,
         ws_url_path: meta.path,
         ws_url_query_keys: meta.query_keys,
-        doc_conversation_id_hash: docUrlByRequest.get(params.requestId) || null,
+        doc_conversation_id_hash: docUrlByRequest.get(docKey(source.tabId, params.requestId)) || null,
       });
       break;
     }
@@ -289,7 +294,7 @@ function onDebuggerEvent(source, method, params) {
       void push(sent ? "ws_frame_sent" : "ws_frame_received", {
         tab_id: source.tabId,
         ws_request_id: params.requestId,
-        doc_conversation_id_hash: docUrlByRequest.get(params.requestId) || null,
+        doc_conversation_id_hash: docUrlByRequest.get(docKey(source.tabId, params.requestId)) || null,
         opcode: frame.opcode,
         mask: frame.mask,
         frame_size: new TextEncoder().encode(payload).length,
@@ -405,3 +410,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   });
   return true;
 });
+
