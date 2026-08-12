@@ -97,31 +97,26 @@ function parseSse(body) {
 }
 
 function extractAssistant(events) {
-  // walk events for the last assistant message content and its final state
+  // ChatGPT SSE typed events:
+  //   message_marker           -> message_id attribution
+  //   <no type> token chunks   -> content delta in `c`
+  //   message_stream_complete  -> semantic terminal signal
   let finalText = "";
   let messageId = null;
   let terminalStatus = null;
   let lastEventType = null;
   for (const ev of events) {
-    const type = ev?.type || ev?.message?.type || null;
-    lastEventType = type;
-    const m = ev?.message;
-    if (m) {
-      if (m.id) messageId = m.id;
-      if (m.status) terminalStatus = m.status;
-      if (m.author?.role === "assistant" && m.content) {
-        if (Array.isArray(m.content)) {
-          const texts = m.content
-            .filter((c) => c && (c.type === "text" || c.text))
-            .map((c) => c.text || c.content || "");
-          if (texts.length) finalText = texts.join("");
-        } else if (typeof m.content === "string") {
-          finalText = m.content;
-        }
+    const type = typeof ev?.type === "string" ? ev.type : null;
+    if (type) lastEventType = type;
+    if (type === "message_marker" && ev.message_id && !messageId) messageId = ev.message_id;
+    if (type === "message_stream_complete") terminalStatus = "message_stream_complete";
+    if (!type && ev && typeof ev === "object") {
+      const c = ev.c;
+      if (typeof c === "string") finalText += c;
+      else if (c && typeof c === "object") {
+        if (typeof c.content === "string") finalText += c.content;
+        else if (typeof c.text === "string") finalText += c.text;
       }
-    }
-    if (ev?.message_ended || ev?.end_turn || type === "message_ended" || type === "done") {
-      terminalStatus = terminalStatus || "ended";
     }
   }
   return {finalText, messageId, terminalStatus, lastEventType};
