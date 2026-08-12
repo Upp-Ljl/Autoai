@@ -1,4 +1,4 @@
-// Probe extension popup controller.
+// Phase 2 probe popup controller.
 const $ = (id) => document.getElementById(id);
 let attached = false;
 
@@ -6,40 +6,56 @@ async function send(message) {
   return chrome.runtime.sendMessage(message);
 }
 
-function setAttached(state, url) {
+function setAttached(state, detail) {
   attached = state;
   $("attach").disabled = state;
+  $("attachAll").disabled = state;
   $("detach").disabled = !state;
-  $("mark1").disabled = !state;
-  $("mark2").disabled = !state;
+  $("markA").disabled = !state;
+  $("markB").disabled = !state;
+  $("markG").disabled = !state;
+  $("markConcurrent").disabled = !state;
   $("export").disabled = !state;
   $("clear").disabled = false;
   const el = $("status");
   el.textContent = state
-    ? `已附着: ${url || "当前会话"}\n① 点「标记: 普通文本消息」→ 发一条普通消息\n② 点「标记: @GitHub 消息」→ 发一条 @GitHub 消息\n③ 「停止并导出 JSONL」`
-    : "未附着。请打开 ChatGPT 测试会话标签页并点「附着到当前标签页」。";
+    ? (detail || "已附着。") + "\n标记 → 发消息 → 标记下一项 → … → 停止并导出"
+    : "未附着。打开 ChatGPT 测试会话后点「附着当前标签页」或「附着所有 ChatGPT 标签页」。";
   el.className = "status";
 }
 
-// Restore real attach state when the popup opens (popup is a fresh page each time).
 (async function init() {
   const status = await send({type: "PROBE_STATUS"});
   if (status?.attached) {
-    setAttached(true, status.tabUrl || null);
+    setAttached(true, `已附着 ${status.tabIds.length} 个标签页。`);
   }
 })();
 
-$("attach").addEventListener("click", async () => {
-  const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
+async function attachTo(tab) {
   if (!tab || !tab.url || !tab.url.startsWith("https://chatgpt.com/")) {
-    $("status").textContent = "请先打开 ChatGPT 测试会话标签页（https://chatgpt.com/）。";
+    $("status").textContent = "请先打开 ChatGPT 测试会话标签页。";
     $("status").className = "status bad";
-    return;
+    return false;
   }
   const result = await send({type: "PROBE_ATTACH", tabId: tab.id});
   if (result.ok) {
-    setAttached(true);
-    $("status").textContent = "已附着: " + tab.url + "\n① 点「标记: 普通文本消息」→ 发一条普通消息\n② 点「标记: @GitHub 消息」→ 发一条 @GitHub 消息\n③ 「停止并导出 JSONL」";
+    setAttached(true, "已附着当前标签页。");
+    return true;
+  }
+  $("status").textContent = "附着失败: " + (result.error || "unknown");
+  $("status").className = "status bad";
+  return false;
+}
+
+$("attach").addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
+  await attachTo(tab);
+});
+
+$("attachAll").addEventListener("click", async () => {
+  const result = await send({type: "PROBE_ATTACH_ALL"});
+  if (result.ok) {
+    setAttached(true, `已附着 ${result.count}/${result.total} 个 ChatGPT 标签页。`);
   } else {
     $("status").textContent = "附着失败: " + (result.error || "unknown");
     $("status").className = "status bad";
@@ -51,17 +67,30 @@ $("detach").addEventListener("click", async () => {
   setAttached(false);
 });
 
-$("mark1").addEventListener("click", async () => {
-  await send({type: "PROBE_MARK", case: 1, label: "plain-text-message"});
-  $("status").textContent = "已标记「普通文本消息」。现在发送你的普通消息。";
-  $("status").className = "status ok";
-});
+function mark(label, text) {
+  $("markA").addEventListener("click", async () => {
+    await send({type: "PROBE_MARK", case: "A", label: "TP2-A"});
+    $("status").textContent = "已标记 A。现在向 TP2-A 发送: Reply with exactly: TP2_A_7K3M";
+    $("status").className = "status ok";
+  });
+  $("markB").addEventListener("click", async () => {
+    await send({type: "PROBE_MARK", case: "B", label: "TP2-B"});
+    $("status").textContent = "已标记 B。现在向 TP2-B 发送: Reply with exactly: TP2_B_9Q2X";
+    $("status").className = "status ok";
+  });
+  $("markG").addEventListener("click", async () => {
+    await send({type: "PROBE_MARK", case: "GITHUB", label: "TP2-GITHUB"});
+    $("status").textContent = "已标记 GITHUB。现在向 TP2-GITHUB 发送只读 @GitHub 请求。";
+    $("status").className = "status ok";
+  });
+  $("markConcurrent").addEventListener("click", async () => {
+    await send({type: "PROBE_MARK", case: "concurrent", label: "two-tab-concurrent"});
+    $("status").textContent = "已标记并发。A 开始生成未完成时让 B 开始生成。";
+    $("status").className = "status ok";
+  });
+}
 
-$("mark2").addEventListener("click", async () => {
-  await send({type: "PROBE_MARK", case: 2, label: "at-github-message"});
-  $("status").textContent = "已标记「@GitHub 消息」。现在发送你的 @GitHub 消息。";
-  $("status").className = "status ok";
-});
+mark();
 
 $("export").addEventListener("click", async () => {
   $("status").textContent = "正在导出…（浏览器会提示保存 JSONL）";
@@ -81,7 +110,6 @@ $("clear").addEventListener("click", async () => {
   $("status").textContent = "记录已清空。";
 });
 
-// live count while attached
 setInterval(async () => {
   if (!attached) return;
   const result = await send({type: "PROBE_COUNT"});

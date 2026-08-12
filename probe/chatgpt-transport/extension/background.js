@@ -1,23 +1,27 @@
-// SAT2 ChatGPT Web Transport Probe — read-only CDP Network collector.
+// SAT2 ChatGPT Web Transport Probe — Phase 2 semantic correlation collector.
 //
-// Collects transport METADATA only:
-//   - request method / URL path / query parameter names / resource type
-//   - header NAMES (never values; cookie/authorization values are never read)
-//   - payload schema / size / sha256 (never the payload content)
-//   - WebSocket frame metadata (opcode / size / hash), never frame content
-//   - response status / mime / encoded data length / termination info
-//
-// This extension never intercepts, modifies, or replays requests, and never
-// calls Network.getResponseBody or any body-capturing command.
+// Read-only CDP Network collector. Captures transport METADATA plus, for
+// Phase 2, in-memory structural parsing of HTTP/WebSocket payloads:
+//   - never persists raw payloads, message text, cookies, authorization,
+//     session/account tokens, or nonce context text
+//   - persists only hashes (SHA-256), top-level keys, field paths,
+//     non-sensitive enum fields (event_type/status/role), sizes
+//   - never intercepts, modifies, replays requests, never calls
+//     Network.getResponseBody or any body-capturing command
 
 const PREFIX = "sat2-probe:";
 const FLUSH_AFTER = 200;
-const MAX_RECORDS = 40000;
+const MAX_RECORDS = 60000;
+
+const PROBE_NONCES = {
+  "A": "TP2_A_7K3M",
+  "B": "TP2_B_9Q2X",
+  "GITHUB": "TP2_GITHUB_OK",
+};
 
 let records = [];
-let attachedTabId = null;
-let attachedTabUrl = null;
-let activeCase = null; // 1 = plain text message, 2 = @GitHub message
+const attachedTabs = new Set();
+let activeCase = null; // "A" | "B" | "GITHUB" | "concurrent"
 
 function iso() {
   return new Date().toISOString();
@@ -29,20 +33,22 @@ async function sha256Text(text) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function hashOf(value) {
+  if (value == null) return Promise.resolve(null);
+  const s = String(value);
+  return s ? sha256Text(s) : Promise.resolve(null);
+}
+
 function urlMeta(rawUrl) {
   try {
     const url = new URL(rawUrl);
-    return {
-      path: url.pathname,
-      query_keys: [...url.searchParams.keys()],
-    };
+    return {path: url.pathname, query_keys: [...url.searchParams.keys()]};
   } catch {
     return {path: String(rawUrl).slice(0, 500), query_keys: []};
   }
 }
 
 function headerNames(headers) {
-  // Names only; values (including cookies/authorization) are never captured.
   try {
     return Object.keys(headers || {}).sort();
   } catch {
@@ -50,42 +56,135 @@ function headerNames(headers) {
   }
 }
 
-function payloadSchema(text) {
-  // Structural schema only: JSON key skeleton, or primitive type for non-JSON.
-  const sample = String(text || "");
-  if (!sample) return {type: "empty"};
-  if (sample.startsWith("{") || sample.startsWith("[")) {
-    try {
-      return jsonSkeleton(JSON.parse(sample), 0);
-    } catch {
-      return {type: "json_unparsed"};
+function fieldPaths(obj, depth = 4, limit = 120) {
+  const paths = [];
+  const walk = (node, prefix, d) => {
+    if (paths.length >= limit) return;
+    if (d > depth) {
+      paths.push(prefix + ":*");
+      return;
     }
-  }
-  return {type: "text", length: sample.length};
+    if (Array.isArray(node)) {
+      if (node.length) walk(node[0], prefix + "[]", d + 1);
+      else paths.push(prefix + "[]");
+      return;
+    }
+    if (node && typeof node === "object") {
+      for (const k of Object.keys(node)) {
+        walk(node[k], prefix ? prefix + "." + k : k, d + 1);
+      }
+      return;
+    }
+    paths.push(prefix + ":" + typeof node);
+  };
+  walk(obj, "", 0);
+  return paths.slice(0, limit);
 }
 
-function jsonSkeleton(value, depth) {
-  if (depth > 3) return {type: "depth_limit"};
-  if (value === null) return {type: "null"};
-  if (Array.isArray(value)) {
+function detectNonce(text) {
+  for (const [label, nonce] of Object.entries(PROBE_NONCES)) {
+    if (text.includes(nonce)) return label;
+  }
+  return null;
+}
+
+function conversationHashFromUrl(rawUrl) {
+  try {
+    const m = new URL(rawUrl).pathname.match(/\/c\/([a-f0-9-]{10,})/);
+    return m ? hashOf(m[1]) : Promise.resolve(null);
+  } catch {
+    return Promise.resolve(null);
+  }
+}
+
+// document URL per network requestId (for WS frames to inherit conversation)
+const docUrlByRequest = new Map();
+
+async function semanticHttp(params) {
+  const req = params.request || {};
+  if (req.method !== "POST" || !req.postData) return null;
+  const meta = urlMeta(req.url);
+  if (!/\/backend-api\/(f\/)?conversation/.test(meta.path)) return null;
+  let body = null;
+  try {
+    body = JSON.parse(req.postData);
+  } catch {
+    return null;
+  }
+  const mid = body?.message?.id;
+  const messageIdHashes = Array.isArray(mid)
+    ? await Promise.all(mid.map((x) => hashOf(x)))
+    : [await hashOf(mid)];
+  return {
+    request_id: params.requestId,
+    endpoint: meta.path,
+    action: body?.action || null,
+    conversation_id_hash: await hashOf(body?.conversation_id),
+    parent_message_id_hash: await hashOf(body?.parent_message_id),
+    message_id_hashes: messageIdHashes,
+    top_level_keys: Object.keys(body || {}).sort(),
+    field_paths: fieldPaths(body),
+    body_size: new TextEncoder().encode(req.postData).length,
+    body_sha256: await sha256Text(req.postData),
+    contains_probe_nonce: detectNonce(req.postData) !== null,
+    probe_nonce_label: detectNonce(req.postData),
+  };
+}
+
+async function semanticWs(payloadText) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(payloadText);
+  } catch {
     return {
-      type: "array",
-      length: value.length,
-      items: value.length ? jsonSkeleton(value[0], depth + 1) : null,
+      parsed: false,
+      contains_probe_nonce: detectNonce(payloadText) !== null,
+      probe_nonce_label: detectNonce(payloadText),
     };
   }
-  if (typeof value === "object") {
-    const keys = {};
-    for (const [k, v] of Object.entries(value)) {
-      keys[k] = jsonSkeleton(v, depth + 1);
+  let convHash = null;
+  let msgHash = null;
+  let parentHash = null;
+  let eventType = null;
+  let status = null;
+  let role = null;
+  const pending = [];
+  const scan = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach(scan);
+      return;
     }
-    return {type: "object", keys};
-  }
-  return {type: typeof value};
-}
-
-function eventTypeFrom(resourceType) {
-  return resourceType || "other";
+    if (node.conversation_id != null) convHash = convHash || hashOf(node.conversation_id);
+    const m = node.message;
+    if (m && typeof m === "object") {
+      if (m.id != null) msgHash = msgHash || hashOf(m.id);
+      if (m.parent_id != null) parentHash = parentHash || hashOf(m.parent_id);
+      if (!role && m.author?.role) role = m.author.role;
+      if (!status && m.status) status = m.status;
+      if (!eventType && m.content_type) eventType = m.content_type;
+    }
+    if (!eventType && typeof node.type === "string") eventType = node.type;
+    if (!status && node.status) status = node.status;
+    for (const v of Object.values(node)) if (v && typeof v === "object") scan(v);
+  };
+  scan(parsed);
+  const nonce = detectNonce(payloadText);
+  return {
+    parsed: true,
+    conversation_id_hash: await convHash,
+    message_id_hash: await msgHash,
+    parent_id_hash: await parentHash,
+    event_type: eventType,
+    status,
+    role,
+    top_level_keys: Array.isArray(parsed)
+      ? [...new Set(parsed.filter((p) => p && typeof p === "object").flatMap((p) => Object.keys(p)))].sort()
+      : Object.keys(parsed).sort(),
+    field_paths: fieldPaths(parsed),
+    contains_probe_nonce: nonce !== null,
+    probe_nonce_label: nonce,
+  };
 }
 
 async function push(kind, data) {
@@ -95,7 +194,6 @@ async function push(kind, data) {
   }
   records.push({ts: iso(), kind, case: activeCase, ...resolved});
   if (records.length >= FLUSH_AFTER) await flush();
-  // keep the in-memory window bounded; full history lives in storage
   if (records.length > 2000) await flush();
 }
 
@@ -111,50 +209,61 @@ async function flush() {
 
 async function recordCount() {
   const key = PREFIX + "pending";
-  const stored = (await chrome.storage.local.get(key))[key] || [];
-  return stored.length;
+  return ((await chrome.storage.local.get(key))[key] || []).length;
 }
 
-// ---- CDP event handling ----------------------------------------------
+// ---- CDP events --------------------------------------------------------
 
 function onDebuggerEvent(source, method, params) {
-  if (source.tabId !== attachedTabId) return;
+  if (!attachedTabs.has(source.tabId)) return;
   switch (method) {
     case "Network.requestWillBeSent": {
       const req = params.request || {};
       const meta = urlMeta(req.url);
+      const docHashPromise = conversationHashFromUrl(params.documentURL || "");
+      void docHashPromise.then((h) => {
+        if (h) docUrlByRequest.set(params.requestId, h);
+        if (docUrlByRequest.size > 500) {
+          const first = docUrlByRequest.keys().next().value;
+          docUrlByRequest.delete(first);
+        }
+      });
       void push("request", {
+        tab_id: source.tabId,
         method: req.method,
         url_path: meta.path,
         url_query_keys: meta.query_keys,
-        resource_type: eventTypeFrom(params.type),
+        resource_type: params.type || "other",
         header_names: headerNames(req.headers),
         payload_size: req.postData ? new TextEncoder().encode(req.postData).length : 0,
         payload_sha256: req.postData ? sha256Text(req.postData) : null,
-        payload_schema: payloadSchema(req.postData),
+        doc_conversation_id_hash: docHashPromise,
         request_id: params.requestId,
+        semantic: semanticHttp(params),
       });
       break;
     }
     case "Network.responseReceived": {
       void push("response", {
+        tab_id: source.tabId,
         request_id: params.requestId,
         status: (params.response || {}).status,
         mime: (params.response || {}).mimeType,
-        resource_type: eventTypeFrom(params.type),
+        resource_type: params.type || "other",
       });
       break;
     }
     case "Network.loadingFinished": {
       void push("finished", {
+        tab_id: source.tabId,
         request_id: params.requestId,
         encoded_data_length: params.encodedDataLength,
-        blocks_count: params.blockCount,
       });
       break;
     }
     case "Network.loadingFailed": {
       void push("failed", {
+        tab_id: source.tabId,
         request_id: params.requestId,
         error_text: params.errorText,
         canceled: Boolean(params.canceled),
@@ -164,8 +273,11 @@ function onDebuggerEvent(source, method, params) {
     case "Network.webSocketCreated": {
       const meta = urlMeta(params.url);
       void push("ws_created", {
+        tab_id: source.tabId,
+        ws_request_id: params.requestId,
         ws_url_path: meta.path,
         ws_url_query_keys: meta.query_keys,
+        doc_conversation_id_hash: docUrlByRequest.get(params.requestId) || null,
       });
       break;
     }
@@ -175,20 +287,22 @@ function onDebuggerEvent(source, method, params) {
       const payload = String(frame.payloadData || "");
       const sent = method === "Network.webSocketFrameSent";
       void push(sent ? "ws_frame_sent" : "ws_frame_received", {
+        tab_id: source.tabId,
+        ws_request_id: params.requestId,
+        doc_conversation_id_hash: docUrlByRequest.get(params.requestId) || null,
         opcode: frame.opcode,
         mask: frame.mask,
-        payload_size: new TextEncoder().encode(payload).length,
-        payload_sha256: payload ? sha256Text(payload) : null,
-        payload_schema: payloadSchema(payload),
-        ws_request_id: params.requestId,
+        frame_size: new TextEncoder().encode(payload).length,
+        frame_sha256: payload ? sha256Text(payload) : null,
+        semantic: semanticWs(payload),
       });
       break;
     }
     case "Network.webSocketClosed": {
       void push("ws_closed", {
+        tab_id: source.tabId,
         ws_request_id: params.requestId,
         code: params.code,
-        reason_size: String(params.reason || "").length,
       });
       break;
     }
@@ -197,76 +311,56 @@ function onDebuggerEvent(source, method, params) {
   }
 }
 
-// ---- lifecycle --------------------------------------------------------
+// ---- lifecycle ---------------------------------------------------------
 
 async function attach(tabId) {
   try {
     await chrome.debugger.attach({tabId}, "1.3");
     await chrome.debugger.sendCommand({tabId}, "Network.enable");
-    attachedTabId = tabId;
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      attachedTabUrl = tab.url || null;
-    } catch {
-      attachedTabUrl = null;
-    }
-    activeCase = null;
-    return {ok: true, tabUrl: attachedTabUrl};
+    attachedTabs.add(tabId);
+    return {ok: true};
   } catch (error) {
     return {ok: false, error: error.message || String(error)};
   }
 }
 
-async function detach() {
-  if (attachedTabId !== null) {
+async function detachOne(tabId) {
+  try {
+    await chrome.debugger.detach({tabId});
+  } catch {}
+  attachedTabs.delete(tabId);
+  await flush();
+}
+
+async function detachAll() {
+  for (const tabId of [...attachedTabs]) {
     try {
-      await chrome.debugger.detach({tabId: attachedTabId});
+      await chrome.debugger.detach({tabId});
     } catch {}
-    attachedTabId = null;
-    attachedTabUrl = null;
   }
+  attachedTabs.clear();
   await flush();
 }
 
 chrome.debugger.onEvent.addListener(onDebuggerEvent);
 chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId === attachedTabId) {
-    attachedTabId = null;
-    attachedTabUrl = null;
-  }
+  attachedTabs.delete(source.tabId);
 });
-
-function bytesToBase64(bytes) {
-  // Chunked conversion avoids call-stack limits for large exports.
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-
-async function exportJsonl() {
-  await flush();
-  const key = PREFIX + "pending";
-  const stored = (await chrome.storage.local.get(key))[key] || [];
-  const rows = [...stored].sort((a, b) => (a.ts < b.ts ? -1 : 1));
-  const jsonl = rows.map((row) => JSON.stringify(row)).join("\n");
-  const blob = new Blob([jsonl], {type: "application/x-ndjson"});
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  const dataUrl = "data:application/x-ndjson;base64," + bytesToBase64(bytes);
-  const filename = `chatgpt-transport-probe-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;
-  const id = await chrome.downloads.download({url: dataUrl, filename, saveAs: true});
-  return {ok: true, rows: rows.length, downloadId: id};
-}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     switch (message?.type) {
       case "PROBE_ATTACH":
         return attach(message.tabId);
+      case "PROBE_ATTACH_ALL": {
+        const tabs = await chrome.tabs.query({url: "https://chatgpt.com/*"});
+        const results = [];
+        for (const tab of tabs) results.push(await attach(tab.id));
+        return {ok: true, count: results.filter((r) => r.ok).length, total: tabs.length};
+      }
       case "PROBE_DETACH":
-        await detach();
+        if (message.tabId) await detachOne(message.tabId);
+        else await detachAll();
         return {ok: true};
       case "PROBE_MARK":
         activeCase = message.case;
@@ -274,18 +368,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return {ok: true};
       case "PROBE_STATUS":
         return {
-          attached: attachedTabId !== null,
-          tabId: attachedTabId,
-          tabUrl: attachedTabUrl,
+          attached: attachedTabs.size > 0,
+          tabIds: [...attachedTabs],
           activeCase,
         };
       case "PROBE_COUNT":
         return {count: await recordCount()};
-      case "PROBE_EXPORT":
-        return exportJsonl();
+      case "PROBE_EXPORT": {
+        await flush();
+        const key = PREFIX + "pending";
+        const stored = (await chrome.storage.local.get(key))[key] || [];
+        const rows = [...stored].sort((a, b) => (a.ts < b.ts ? -1 : 1));
+        const jsonl = rows.map((row) => JSON.stringify(row)).join("\n");
+        const blob = new Blob([jsonl], {type: "application/x-ndjson"});
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let binary = "";
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        const dataUrl = "data:application/x-ndjson;base64," + btoa(binary);
+        const filename = `chatgpt-transport-probe-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;
+        const id = await chrome.downloads.download({url: dataUrl, filename, saveAs: true});
+        return {ok: true, rows: rows.length, downloadId: id};
+      }
       case "PROBE_CLEAR":
         await chrome.storage.local.remove(PREFIX + "pending");
         records = [];
+        docUrlByRequest.clear();
         return {ok: true};
       default:
         return {ok: false, error: "unknown message"};

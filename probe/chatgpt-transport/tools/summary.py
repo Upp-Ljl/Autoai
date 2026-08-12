@@ -36,8 +36,17 @@ def main() -> int:
     out.append(f"- total records: {len(rows)}")
     out.append(f"- source: `{path.name}` (sanitized; no credentials or payload contents)")
 
-    cases = collections.Counter(row.get("case") for row in rows if row.get("kind") != "marker")
-    out.append("- cases: " + ", ".join(f"case{c}: {n}" for c, n in sorted(cases.items())))
+    cases = collections.Counter(
+        (row.get("case") if row.get("case") is not None else "unmarked")
+        for row in rows
+        if row.get("kind") != "marker"
+    )
+    out.append(
+        "- cases: "
+        + ", ".join(f"case{c}: {n}" for c, n in sorted(cases.items(), key=lambda x: str(x[0])))
+    )
+    markers = [row for row in rows if row.get("kind") == "marker"]
+    out.append(f"- markers: {len(markers)}")
 
     kinds = collections.Counter(row.get("kind") for row in rows)
     out.append("")
