@@ -63,8 +63,9 @@ def main() -> int:
     # ---- per case buckets ----
     for idx, row in enumerate(ordered):
         case = case_of.get(idx)
-        summary["cases"].setdefault(case, collections.Counter())
-        summary["cases"][case][row.get("kind")] += 1
+        case_key = "unmarked" if case is None else str(case)
+        summary["cases"].setdefault(case_key, collections.Counter())
+        summary["cases"][case_key][row.get("kind")] += 1
 
     # ---- Q1: HTTP turn -> conversation binding ----
     http = []
