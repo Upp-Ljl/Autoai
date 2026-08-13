@@ -84,3 +84,22 @@ export function pruneHistory(history, maximum = 500) {
   const entries = Object.entries(history || {}).sort((a, b) => String(b[1]).localeCompare(String(a[1])));
   return Object.fromEntries(entries.slice(0, maximum));
 }
+
+export async function daemonDebugLog(settings, event, data = {}) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    await fetch(new URL("/api/v2/extension/debug-log", settings.daemonUrl).toString(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-SAT2-Relay-Token": settings.daemonToken,
+      },
+      body: JSON.stringify({event, at: new Date().toISOString(), ...data}),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+  } catch {
+    clearTimeout(timeout);
+  }
+}

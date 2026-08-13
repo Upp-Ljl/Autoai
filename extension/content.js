@@ -21,7 +21,8 @@
     ],
     stop: [
       'button[data-testid="stop-button"]', 'button[data-testid="composer-stop-button"]',
-      'button[aria-label*="Stop generating"]', 'button[aria-label*="停止生成"]', 'button[aria-label*="停止"]'
+      'button[aria-label="Stop generating"]', 'button[aria-label="停止生成"]',
+      'button[aria-label="Stop"]', 'button[aria-label="停止"]'
     ]
   };
 
@@ -133,7 +134,27 @@
     throw new Error("SEND_BUTTON_NOT_READY");
   }
   function transcriptHas(marker) {
-    return Boolean(marker) && [...document.querySelectorAll('[data-message-author-role="user"]')].some((element) => textOf(element).includes(marker));
+    if (!marker) return false;
+    const selectors = [
+      '[data-message-author-role="user"]',
+      '[data-testid="user-message"]',
+      '[data-message-author-role][data-message-id]'
+    ];
+    for (const selector of selectors) {
+      const match = [...document.querySelectorAll(selector)].find((el) => textOf(el).includes(marker));
+      if (match) return true;
+    }
+    // fallback: any element whose data-message-id container text contains the marker
+    for (const el of document.querySelectorAll('[data-message-id]')) {
+      if (textOf(el).includes(marker)) return true;
+    }
+    return false;
+  }
+
+  function debugReport(event, extra = {}) {
+    try {
+      chrome.runtime.sendMessage({type: "SAT2_DEBUG_LOG", event, at: new Date().toISOString(), url: location.href, ...selectorDiagnostics(), ...extra});
+    } catch {}
   }
   async function verifySubmission(marker, timeout = 25000) {
     const started = Date.now();
@@ -141,18 +162,26 @@
     return false;
   }
   async function sendMessage({text, relayId, requiredApps, connectorMode, strictApps}) {
-    if (!location.href.startsWith("https://chatgpt.com/") && !globalThis.__SAT2_RELAY_TEST__) throw new Error("NOT_CHATGPT");
-    if (loginRequired()) throw new Error("LOGIN_REQUIRED");
-    if (confirmationVisible()) throw new Error("CONFIRMATION_VISIBLE");
-    if (busy()) throw new Error("SESSION_BUSY");
-    const marker = `Relay delivery: ${relayId}`;
-    if (relayId && (sent.has(relayId) || transcriptHas(marker))) { sent.set(relayId, Date.now()); return {ok: true, duplicate: true, marker, health: health()}; }
-    const editor = findComposer(); if (!editor) throw new Error("COMPOSER_NOT_FOUND");
-    const effectiveConnectorMode = connectorMode || (strictApps ? "strict_attach" : "session_verified");
-    const filled = await fill(editor, text, requiredApps, effectiveConnectorMode); const button = await waitSendReady(editor); button.click();
-    if (!(await verifySubmission(marker))) throw new Error("SUBMISSION_MARKER_NOT_CONFIRMED");
-    if (relayId) sent.set(relayId, Date.now());
-    return {ok: true, connectorAttached: filled.connectorAttached, connectorMode: filled.connectorMode, marker, health: health()};
+    try {
+      if (!location.href.startsWith("https://chatgpt.com/") && !globalThis.__SAT2_RELAY_TEST__) throw new Error("NOT_CHATGPT");
+      if (loginRequired()) throw new Error("LOGIN_REQUIRED");
+      if (confirmationVisible()) throw new Error("CONFIRMATION_VISIBLE");
+      if (busy()) throw new Error("SESSION_BUSY");
+      const marker = `Relay delivery: ${relayId}`;
+      if (relayId && (sent.has(relayId) || transcriptHas(marker))) { sent.set(relayId, Date.now()); return {ok: true, duplicate: true, marker, health: health()}; }
+      const editor = findComposer(); if (!editor) throw new Error("COMPOSER_NOT_FOUND");
+      const effectiveConnectorMode = connectorMode || (strictApps ? "strict_attach" : "session_verified");
+      // The marker must be part of the sent message so verifySubmission can
+      // confirm it in the transcript.
+      const sendText = relayId ? `${marker}\n\n${text}` : text;
+      const filled = await fill(editor, sendText, requiredApps, effectiveConnectorMode); const button = await waitSendReady(editor); button.click();
+      if (!(await verifySubmission(marker))) throw new Error("SUBMISSION_MARKER_NOT_CONFIRMED");
+      if (relayId) sent.set(relayId, Date.now());
+      return {ok: true, connectorAttached: filled.connectorAttached, connectorMode: filled.connectorMode, marker, health: health()};
+    } catch (error) {
+      debugReport("content_send_failed", {code: error.message || String(error), relayId: relayId || null});
+      throw error;
+    }
   }
 
   function balancedJsonObjects(text) {

@@ -1,4 +1,4 @@
-import {canonicalChatUrl, daemonFetch, loadSettings, parseConversationKey, pruneHistory, saveSettings} from "./lib.js";
+import {canonicalChatUrl, daemonDebugLog, daemonFetch, loadSettings, parseConversationKey, pruneHistory, saveSettings} from "./lib.js";
 
 const ALARM = "sat2-relay-cycle";
 const NOTIFICATION_ICON = chrome.runtime.getURL("icon128.png");
@@ -369,6 +369,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return {ok: true};
     }
     if (message?.type === "SAT2_RUN_NOW") return runCycle({force: true});
+    if (message?.type === "SAT2_DEBUG_LOG") {
+      const settings = await loadSettings();
+      const {type, ...payload} = message;
+      await daemonDebugLog(settings, payload.event || "content_debug", payload).catch(() => {});
+      return {ok: true};
+    }
     if (message?.type === "SAT2_TEST_DAEMON") {
       const settings = await loadSettings();
       return daemonFetch(settings, "/api/v2/health");
